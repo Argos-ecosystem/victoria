@@ -1,6 +1,4 @@
-#!/bin/sh
-'''exec' "/Users/oscaraguilera/Desktop/Project AI/Victoria/myenv/bin/python3" "$0" "$@"
-' '''
+#!/Users/agui1era/Desktop/Victoria/myenv/bin/python3
 # -*- coding: utf-8 -*-
 import re
 import sys

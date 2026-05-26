@@ -17,7 +17,7 @@ MONGO_DB_EVENTS = os.getenv("MONGO_DB_EVENTS", "omnistatus")
 EVENTS_COLL = os.getenv("MONGO_COLL_NAME", "events")
 APIKEY = os.getenv("VICTORIA_APIKEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
 
 mongo = MongoClient(MONGO_URI)
 col_cache = mongo[MONGO_DB_CACHE][CACHE_COLL]

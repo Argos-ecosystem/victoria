@@ -16,7 +16,7 @@ import speech_recognition as sr
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 VICTORIA_APIKEY = os.getenv("VICTORIA_APIKEY")
-VICTORIA_URL = os.getenv("VICTORIA_URL", "https://victor.ngrok.dev/analyze/on-demand")
+VICTORIA_URL = os.getenv("VICTORIA_URL", "http://localhost:8888/analyze/on-demand")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not OPENAI_API_KEY:
@@ -48,8 +48,7 @@ def consultar_servidor_victoria(minutos: int, prompt: str) -> str:
     payload = {"minutes": minutos, "prompt": prompt}
     params = {"apikey": VICTORIA_APIKEY}
     headers = {
-        "Content-Type": "application/json",
-        "ngrok-skip-browser-warning": "true"  # Clave para evitar bloqueos del plan gratuito de ngrok en sistemas externos
+        "Content-Type": "application/json"
     }
     try:
         response = requests.post(VICTORIA_URL, params=params, json=payload, headers=headers, timeout=30)

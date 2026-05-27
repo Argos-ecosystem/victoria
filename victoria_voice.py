@@ -16,7 +16,7 @@ import speech_recognition as sr
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 VICTORIA_APIKEY = os.getenv("VICTORIA_APIKEY")
-VICTORIA_URL = os.getenv("VICTORIA_URL", "https://victor.ngrok.dev/analyze/on-demand")
+VICTORIA_URL = os.getenv("VICTORIA_URL")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 if not OPENAI_API_KEY:
@@ -33,6 +33,9 @@ if not VICTORIA_APIKEY:
 
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+WAKE_SOUND_FILE = "/System/Library/Sounds/Glass.aiff"
+TTS_VOICE = os.getenv("TTS_VOICE", "alloy") # Cambiado de 'marin' a 'alloy' para usar una voz válida de OpenAI
+TTS_MODEL = os.getenv("TTS_MODEL", "tts-1")
 
 # --- Definición de Tool para Gemini ---
 def consultar_servidor_victoria(minutos: int, prompt: str) -> str:
@@ -49,7 +52,7 @@ def consultar_servidor_victoria(minutos: int, prompt: str) -> str:
     params = {"apikey": VICTORIA_APIKEY}
     headers = {
         "Content-Type": "application/json",
-        "ngrok-skip-browser-warning": "true"  # Clave para evitar bloqueos del plan gratuito de ngrok en sistemas externos
+        
     }
     try:
         response = requests.post(VICTORIA_URL, params=params, json=payload, headers=headers, timeout=30)
@@ -59,6 +62,14 @@ def consultar_servidor_victoria(minutos: int, prompt: str) -> str:
         return f"Error en la consulta al servidor: {e}"
 
 print("� Preparando la interfaz de voz de Victoria...")
+
+def play_wake_sound():
+    try:
+        subprocess.run(["afplay", WAKE_SOUND_FILE], check=True)
+    except Exception:
+        # Si falla el sonido del sistema, se ignora y se continúa
+        pass
+
 
 def wait_for_wakeword():
     recognizer = sr.Recognizer()
@@ -78,9 +89,8 @@ def wait_for_wakeword():
                 texto = recognizer.recognize_google(audio, language="es-ES").lower()
                 
                 if "victoria" in texto:
-                    print("✨ ¡Dígame, Sr. Aguilera!")
-                    # Responde con la voz de Victoria antes de empezar a grabar
-                    speak_text("Dígame, señor Aguilera.")
+                    print("✨ ¡Despertando...")
+                    play_wake_sound()
                     return
             except sr.WaitTimeoutError:
                 continue  # Silencio, sigue esperando
@@ -114,7 +124,7 @@ def transcribe_audio(filename):
                 audio_file
             ]
         )
-        texto = response.text.strip()
+        texto = response.text.strip() if response.text else "" # Asegurarse de que response.text no sea None
         print(f"🗣️  Tú: '{texto}'")
         
         # 3. Limpiar/Borrar el archivo subido para no ocupar espacio en tu cuota de Google
@@ -150,8 +160,8 @@ def speak_text(text):
     print("🔊  Generando voz y reproduciendo...")
     try:
         response = client.audio.speech.create(
-            model="tts-1",
-            voice="nova", # Voces disponibles: alloy, echo, fable, onyx, nova, shimmer
+            model=TTS_MODEL,
+            voice=TTS_VOICE, # Voces disponibles: alloy, ash, ballad, coral, echo, fable, onyx, nova, sage, shimmer, verse, marin, cedar
             input=text
         )
         tts_filename = "temp_response.mp3"

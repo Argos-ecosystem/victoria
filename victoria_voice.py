@@ -1,35 +1,69 @@
-import os
+import argparse
 import json
-import sounddevice as sd
-import soundfile as sf
+import os
+import signal
 import subprocess
-from dotenv import load_dotenv
+import warnings
+
 import openai
 import numpy as np
-import argparse
 import requests
-from google import genai
-from google.genai import types
-import speech_recognition as sr
+import sounddevice as sd
+import soundfile as sf
+from dotenv import load_dotenv
 
-# Configuración
+warnings.filterwarnings("ignore", category=FutureWarning, module=r"google\.(auth|oauth2)")
+
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    genai = None
+    types = None
+
+try:
+    import speech_recognition as sr
+except ImportError:
+    sr = None
+
+try:
+    from faster_whisper import WhisperModel
+except ImportError:
+    WhisperModel = None
+
+
 load_dotenv()
+
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 VICTORIA_APIKEY = os.getenv("VICTORIA_APIKEY")
 VICTORIA_URL = os.getenv("VICTORIA_URL")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_TRANSCRIBE_MODEL = os.getenv("GEMINI_TRANSCRIBE_MODEL", "gemini-2.5-flash")
+VICTORIA_APIKEY = os.getenv("VICTORIA_APIKEY")
+VICTORIA_URL = os.getenv("VICTORIA_URL", "http://localhost:8888/analyze/on-demand")
+RECORDING_SOUND = os.getenv("VICTORIA_RECORDING_SOUND", "/System/Library/Sounds/Ping.aiff")
+GOOGLE_ASR_LANGUAGES = [
+    lang.strip()
+    for lang in os.getenv("VICTORIA_GOOGLE_ASR_LANGUAGES", "es-CL,es-ES,es-419").split(",")
+    if lang.strip()
+]
+LOCAL_ASR_MODEL = os.getenv("VICTORIA_LOCAL_ASR_MODEL", "tiny")
+LOCAL_ASR_TIMEOUT_SECONDS = int(os.getenv("VICTORIA_LOCAL_ASR_TIMEOUT_SECONDS", "60"))
+BAD_TRANSCRIPT_MARKERS = (
+    "[NO_SPEECH]",
+    "amara.org",
+    "subtitulos realizados",
+    "subtítulos realizados",
+    "gracias por ver",
+)
 
 if not OPENAI_API_KEY:
-    print("❌ Error: Falta OPENAI_API_KEY en el archivo .env (Requerido para el Text-to-Speech)")
-    exit(1)
-
-if not GEMINI_API_KEY:
-    print("❌ Error: Falta GEMINI_API_KEY en el archivo .env")
-    exit(1)
+    print("Error: falta OPENAI_API_KEY en el archivo .env.")
+    raise SystemExit(1)
 
 if not VICTORIA_APIKEY:
-    print("❌ Error: Falta VICTORIA_APIKEY en el archivo .env (Necesario para que la Tool llame a Victoria)")
-    exit(1)
+    print("Error: falta VICTORIA_APIKEY en el archivo .env.")
+    raise SystemExit(1)
 
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
@@ -37,17 +71,9 @@ WAKE_SOUND_FILE = "/System/Library/Sounds/Glass.aiff"
 TTS_VOICE = os.getenv("TTS_VOICE", "alloy") # Cambiado de 'marin' a 'alloy' para usar una voz válida de OpenAI
 TTS_MODEL = os.getenv("TTS_MODEL", "tts-1")
 
-# --- Definición de Tool para Gemini ---
 def consultar_servidor_victoria(minutos: int, prompt: str) -> str:
-    """
-    Consulta la base de datos de eventos recientes del sistema a través del servidor.
-    
-    Args:
-        minutos: El rango de tiempo en minutos. Extrae y calcula esto matemáticamente basado en lo que pide el usuario (ej: "última hora" = 60, "2 horas" = 120, "10 minutos" = 10).
-        prompt: La instrucción que el servidor usará para analizar los eventos. Debe ser una directiva clara adaptada a lo que pidió el usuario (ej: "Haz un resumen general" o "Filtra incidentes de seguridad").
-    """
-    print(f"📡  [Function Call] Gemini extrajo parámetros -> minutos={minutos} | prompt='{prompt}'")
-    
+    print(f"[Function Call] minutos={minutos} | prompt='{prompt}'")
+
     payload = {"minutes": minutos, "prompt": prompt}
     params = {"apikey": VICTORIA_APIKEY}
     headers = {
@@ -57,11 +83,21 @@ def consultar_servidor_victoria(minutos: int, prompt: str) -> str:
     try:
         response = requests.post(VICTORIA_URL, params=params, json=payload, headers=headers, timeout=30)
         response.raise_for_status()
-        return response.json().get("result", "Sin resultados.")
+        data = response.json()
+        return data.get("result") or json.dumps(data, ensure_ascii=False)
     except Exception as e:
-        return f"Error en la consulta al servidor: {e}"
+        return f"Error en la consulta al servidor Victoria: {e}"
 
-print("� Preparando la interfaz de voz de Victoria...")
+
+def play_recording_sound():
+    if not RECORDING_SOUND or not os.path.exists(RECORDING_SOUND):
+        return
+
+    try:
+        subprocess.run(["afplay", RECORDING_SOUND], check=False)
+    except Exception as e:
+        print(f"Aviso: no se pudo reproducir el sonido de grabacion: {e}")
+
 
 def play_wake_sound():
     try:
@@ -72,46 +108,45 @@ def play_wake_sound():
 
 
 def wait_for_wakeword():
+    if sr is None:
+        input("\nSpeechRecognition no esta instalado. Presiona Enter para hablar...")
+        return
+
     recognizer = sr.Recognizer()
-    print("\n💤 En modo reposo. Di 'Victoria' para despertarme (o presiona Ctrl+C para salir)...")
-    
-    # Usamos el micrófono por defecto en modo escucha pasiva
+    print("\nEn reposo. Di 'Victoria' para despertarme, o presiona Ctrl+C para salir.")
+
     with sr.Microphone() as source:
-        # Ajuste dinámico rápido para ignorar el ruido de fondo
         recognizer.adjust_for_ambient_noise(source, duration=0.5)
-        
+
         while True:
             try:
-                # Escucha en fragmentos cortos (máximo 3 segundos de habla)
                 audio = recognizer.listen(source, timeout=1, phrase_time_limit=3)
-                
-                # Motor gratuito de Google para escaneo rápido de la palabra clave
-                texto = recognizer.recognize_google(audio, language="es-ES").lower()
-                
-                if "victoria" in texto:
-                    print("✨ ¡Despertando...")
-                    play_wake_sound()
+                text = recognizer.recognize_google(audio, language="es-ES").lower()
+                if "victoria" in text:
+                    print("Victoria despierta.")
+                    play_recording_sound()
                     return
             except sr.WaitTimeoutError:
-                continue  # Silencio, sigue esperando
+                continue
             except sr.UnknownValueError:
-                continue  # Hubo ruido pero no palabras claras, sigue esperando
+                continue
             except Exception as e:
-                # Fallback de seguridad por si no hay internet
-                input(f"\n⚠️ Fallo en red ({e}). Presiona Enter para hablar...")
+                input(f"\nNo pude usar la palabra de activacion ({e}). Presiona Enter para hablar...")
                 return
 
+
 def record_audio(filename="temp_query.wav", duration=5, fs=44100):
-    print(f"\n🎙️  Escuchando por {duration} segundos... (¡Habla ahora!)")
-    # Grabamos en 1 canal (mono) a 44100 Hz
-    recording = sd.rec(int(duration * fs), samplerate=fs, channels=1, dtype='int16')
-    sd.wait()  # Esperar a que terminen los 5 segundos
+    print(f"\nGrabando por {duration} segundos. Habla ahora.")
+    play_recording_sound()
+    recording = sd.rec(int(duration * fs), samplerate=fs, channels=1, dtype="int16")
+    sd.wait()
     sf.write(filename, recording, fs)
-    print("✅  Audio grabado.")
+    print("Audio grabado.")
     return filename
 
-def transcribe_audio(filename):
-    print("⚡  Transcribiendo audio en la nube con Gemini 2.5 Flash...")
+
+def transcribe_audio_openai(filename):
+    print(f"Transcribiendo audio con OpenAI ({OPENAI_TRANSCRIBE_MODEL})...")
     try:
         # 1. Subir el archivo de audio a los servidores de Gemini
         audio_file = gemini_client.files.upload(file=filename)
@@ -132,32 +167,282 @@ def transcribe_audio(filename):
         
         return texto
     except Exception as e:
-        print(f"❌ Error en transcripción con Gemini: {e}")
+        print(f"Error en transcripcion OpenAI: {e}")
         return ""
 
 
-def ask_gemini(prompt_text, minutes=60):
-    print("🧠  Analizando intención con Gemini (Auto Function Calling)...")
+def prepare_audio_for_asr(filename, suffix="asr"):
     try:
-        # Iniciamos el chat y le damos permiso de usar su herramienta automáticamente
-        config = types.GenerateContentConfig(
-            system_instruction="Eres Victoria, una asistente de voz inteligente, muy concisa y conversacional. Tienes acceso a la herramienta 'consultar_servidor_victoria'. Cuando el usuario te pregunte por eventos, reportes o resúmenes, llama a esa función de forma automática para obtener la información. Si el usuario te hace una pregunta general, simplemente conversa. Tus respuestas finales deben ser muy cortas y naturales para leerse en voz alta.",
-            tools=[consultar_servidor_victoria],
-        )
-        chat = gemini_client.chats.create(model="gemini-2.5-flash", config=config)
-        
-        mensaje = f"Pregunta del usuario: '{prompt_text}'.\n\n(Si necesitas usar tu herramienta para buscar eventos y el usuario no especifica el tiempo, asume {minutes} minutos)."
-        response = chat.send_message(mensaje)
-        
-        result_text = response.text.strip() if response.text else "No logré estructurar una respuesta."
-        print(f"🤖  Victoria: {result_text}")
-        return result_text
+        audio, sample_rate = sf.read(filename, dtype="float32")
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+
+        audio = np.nan_to_num(audio)
+        audio = audio - float(np.mean(audio))
+        peak = float(np.max(np.abs(audio))) if audio.size else 0.0
+        if peak <= 0.0001:
+            return filename
+
+        audio = audio / peak * 0.92
+        abs_audio = np.abs(audio)
+        threshold = max(0.008, float(np.percentile(abs_audio, 90)) * 0.10)
+        voiced = np.flatnonzero(abs_audio > threshold)
+        if voiced.size:
+            padding = int(sample_rate * 0.35)
+            start = max(0, int(voiced[0]) - padding)
+            end = min(len(audio), int(voiced[-1]) + padding)
+            audio = audio[start:end]
+
+        prepared_filename = os.path.splitext(filename)[0] + f"_{suffix}.wav"
+        sf.write(prepared_filename, audio, sample_rate, subtype="PCM_16")
+        return prepared_filename
     except Exception as e:
-        print(f"❌ Error al consultar a Gemini: {e}")
-        return "Hubo un error al comunicarme con el cerebro de Gemini."
+        print(f"Aviso: no se pudo preparar audio para ASR: {e}")
+        return filename
+
+
+def clean_transcript(text):
+    text = (text or "").strip().strip('"').strip("'").strip()
+    if not text:
+        return ""
+
+    lowered = text.lower()
+    if any(marker.lower() in lowered for marker in BAD_TRANSCRIPT_MARKERS):
+        return ""
+
+    return text
+
+
+def transcribe_audio_gemini(filename):
+    if gemini_client is None:
+        print("ASR Gemini no disponible: instala google-genai y define GEMINI_API_KEY.")
+        return ""
+
+    print(f"Transcribiendo audio con Gemini Flash ({GEMINI_TRANSCRIBE_MODEL})...")
+    try:
+        prepared_filename = prepare_audio_for_asr(filename, suffix="gemini")
+        audio_file = gemini_client.files.upload(file=prepared_filename)
+        try:
+            response = gemini_client.models.generate_content(
+                model=GEMINI_TRANSCRIBE_MODEL,
+                config=types.GenerateContentConfig(temperature=0) if types else None,
+                contents=[
+                    (
+                        "Transcribe exactamente la voz humana en este audio. El idioma esperado es español "
+                        "latinoamericano, probablemente chileno. No traduzcas, no corrijas la intención y no "
+                        "agregues comentarios. Si no hay habla clara, devuelve exactamente [NO_SPEECH]. "
+                        "Devuelve solo la transcripción."
+                    ),
+                    audio_file,
+                ],
+            )
+            text = clean_transcript(response.text)
+            print(f"Tu: '{text}'")
+            return text
+        finally:
+            gemini_client.files.delete(name=audio_file.name)
+    except Exception as e:
+        print(f"Error en transcripcion Gemini: {e}")
+        return ""
+
+
+def pick_google_transcript(result):
+    alternatives = result.get("alternative") or []
+    if not alternatives:
+        return ""
+
+    best = max(alternatives, key=lambda item: item.get("confidence", 0.0))
+    return clean_transcript(best.get("transcript"))
+
+
+def transcribe_audio_google(filename):
+    if sr is None:
+        print("ASR Google no disponible: instala SpeechRecognition.")
+        return ""
+
+    print("Transcribiendo audio con Google ASR optimizado...")
+    recognizer = sr.Recognizer()
+    recognizer.dynamic_energy_threshold = False
+    recognizer.energy_threshold = 180
+    prepared_filename = prepare_audio_for_asr(filename, suffix="google")
+
+    try:
+        with sr.AudioFile(prepared_filename) as source:
+            audio = recognizer.record(source)
+
+        for language in GOOGLE_ASR_LANGUAGES:
+            try:
+                result = recognizer.recognize_google(audio, language=language, show_all=True)
+                text = pick_google_transcript(result)
+                if text:
+                    print(f"Tu ({language}): '{text}'")
+                    return text
+            except sr.UnknownValueError:
+                continue
+
+        print("Google ASR no entendio el audio.")
+        return ""
+    except sr.UnknownValueError:
+        print("Google ASR no entendio el audio.")
+        return ""
+    except Exception as e:
+        print(f"Error en Google ASR: {e}")
+        return ""
+
+
+def transcribe_audio_local_whisper(filename):
+    global local_whisper_model
+
+    if WhisperModel is None:
+        print("Whisper local no disponible: instala faster-whisper.")
+        return ""
+
+    print(f"Transcribiendo localmente con faster-whisper ({LOCAL_ASR_MODEL})...")
+    try:
+        if local_whisper_model is None:
+            local_whisper_model = WhisperModel(LOCAL_ASR_MODEL, device="auto", compute_type="auto")
+
+        segments, _ = local_whisper_model.transcribe(filename, language="es", vad_filter=True)
+        text = " ".join(segment.text.strip() for segment in segments).strip()
+        print(f"Tu: '{text}'")
+        return text
+    except Exception as e:
+        print(f"Whisper local fallo: {e}")
+        return ""
+
+
+def transcribe_audio_local_sphinx(filename):
+    if sr is None:
+        print("ASR local no disponible: instala SpeechRecognition y pocketsphinx.")
+        return ""
+
+    print("Transcribiendo audio localmente con Sphinx...")
+    recognizer = sr.Recognizer()
+    try:
+        with sr.AudioFile(filename) as source:
+            audio = recognizer.record(source)
+        text = recognizer.recognize_sphinx(audio, language="es-ES").strip()
+        print(f"Tu: '{text}'")
+        return text
+    except Exception as e:
+        print(f"ASR local fallo: {e}")
+        return ""
+
+
+def transcribe_audio_local(filename):
+    def timeout_handler(signum, frame):
+        raise TimeoutError(f"ASR local no termino dentro de {LOCAL_ASR_TIMEOUT_SECONDS}s")
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(LOCAL_ASR_TIMEOUT_SECONDS)
+
+    try:
+        text = transcribe_audio_local_whisper(filename)
+        if text:
+            return text
+
+        return transcribe_audio_local_sphinx(filename)
+    except TimeoutError as e:
+        print(str(e))
+        return ""
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
+def transcribe_audio(filename, asr_provider):
+    if asr_provider == "gemini":
+        text = transcribe_audio_gemini(filename)
+        if text:
+            return text
+        print("Usando Google ASR como fallback de transcripcion.")
+        text = transcribe_audio_google(filename)
+        if text:
+            return text
+        print("Usando OpenAI como fallback de transcripcion.")
+        return transcribe_audio_openai(filename)
+
+    if asr_provider == "google":
+        text = transcribe_audio_google(filename)
+        if text:
+            return text
+        print("Usando OpenAI como fallback de transcripcion.")
+        return transcribe_audio_openai(filename)
+
+    if asr_provider == "local":
+        text = transcribe_audio_local(filename)
+        if text:
+            return text
+        print("Usando OpenAI como fallback de transcripcion.")
+
+    return transcribe_audio_openai(filename)
+
+
+def run_tool_call(tool_call):
+    if tool_call.function.name != "consultar_servidor_victoria":
+        return f"Tool desconocida: {tool_call.function.name}"
+
+    try:
+        args = json.loads(tool_call.function.arguments or "{}")
+    except json.JSONDecodeError as e:
+        return f"Argumentos invalidos para tool call: {e}"
+
+    minutos = int(args.get("minutos", 60))
+    prompt = args.get("prompt") or "Resume los eventos relevantes de forma breve."
+    return consultar_servidor_victoria(minutos=minutos, prompt=prompt)
+
+
+def ask_openai(prompt_text, minutes=60):
+    print(f"Analizando intencion con OpenAI ({OPENAI_VOICE_MODEL}) y function calling...")
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Eres Victoria, una asistente de voz inteligente, concisa y conversacional. "
+                "Si el usuario pregunta por eventos, reportes, resumenes, incidentes o actividad reciente, "
+                "usa la herramienta consultar_servidor_victoria. Si el usuario no especifica tiempo, "
+                f"asume {minutes} minutos. Tus respuestas finales deben ser cortas y naturales para voz."
+            ),
+        },
+        {"role": "user", "content": prompt_text},
+    ]
+
+    try:
+        for _ in range(4):
+            response = client.chat.completions.create(
+                model=OPENAI_VOICE_MODEL,
+                messages=messages,
+                tools=TOOLS,
+                tool_choice="auto",
+            )
+            message = response.choices[0].message
+            messages.append(message.model_dump(exclude_none=True))
+
+            if not message.tool_calls:
+                result_text = (message.content or "No logre estructurar una respuesta.").strip()
+                print(f"Victoria: {result_text}")
+                return result_text
+
+            for tool_call in message.tool_calls:
+                tool_result = run_tool_call(tool_call)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": tool_result,
+                    }
+                )
+
+        return "Necesité demasiados pasos para responder. Intenta hacer la consulta más directa."
+    except Exception as e:
+        print(f"Error al consultar OpenAI: {e}")
+        return "Hubo un error al comunicarme con el cerebro de Victoria."
+
 
 def speak_text(text):
-    print("🔊  Generando voz y reproduciendo...")
+    print("Generando voz y reproduciendo...")
     try:
         response = client.audio.speech.create(
             model=TTS_MODEL,
@@ -166,47 +451,49 @@ def speak_text(text):
         )
         tts_filename = "temp_response.mp3"
         response.stream_to_file(tts_filename)
-        
-        # Reproducir en Mac usando afplay de forma síncrona
-        subprocess.run(["afplay", tts_filename])
+        subprocess.run(["afplay", tts_filename], check=False)
     except Exception as e:
-        print(f"❌ Error en TTS: {e}")
+        print(f"Error en TTS: {e}")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Victoria Voice Interface")
-    parser.add_argument("-d", "--duration", type=int, default=4, help="Duración de la grabación de voz en segundos (default: 4)")
-    parser.add_argument("-m", "--minutes", type=int, default=60, help="Minutos de historial de eventos a consultar (default: 60)")
+    parser.add_argument("-d", "--duration", type=int, default=6, help="Duracion de la grabacion en segundos.")
+    parser.add_argument("-m", "--minutes", type=int, default=60, help="Minutos por defecto para consultar eventos.")
+    parser.add_argument(
+        "--asr",
+        choices=["gemini", "google", "openai", "local"],
+        default=os.getenv("VICTORIA_ASR", "gemini"),
+    )
+    parser.add_argument("--no-wakeword", action="store_true", help="Salta la palabra de activacion y graba directo.")
     args = parser.parse_args()
 
     print("========================================")
-    print("🦊 Victoria Voice Interface Activada 🦊")
+    print("Victoria Voice Interface Activada")
     print("========================================")
-    print(f"⚙️  Configuración: {args.duration}s de escucha, {args.minutes}m de eventos.")
-    
+    print(f"Configuracion: escucha={args.duration}s, eventos={args.minutes}m, asr={args.asr}.")
+
     while True:
         try:
-            wait_for_wakeword()
-            
-            # 1. Grabar
+            if args.no_wakeword:
+                input("\nPresiona Enter para grabar...")
+            else:
+                wait_for_wakeword()
+
             audio_file = record_audio(duration=args.duration)
-            
-            # 2. Transcribir
-            text = transcribe_audio(audio_file)
+            text = transcribe_audio(audio_file, args.asr)
             if not text.strip():
-                print("⚠️  No se escuchó nada o el audio no fue claro. Intenta de nuevo.")
+                print("No se escucho nada claro. Intenta de nuevo.")
                 continue
-            
-            # 3. Preguntar a Gemini
-            respuesta = ask_gemini(text, minutes=args.minutes)
-            
-            # 4. Hablar
-            speak_text(respuesta)
-            
+
+            response_text = ask_openai(text, minutes=args.minutes)
+            speak_text(response_text)
         except KeyboardInterrupt:
             print("\nSaliendo de la interfaz de voz...")
             break
         except Exception as e:
-            print(f"\n❌ Error inesperado: {e}")
+            print(f"\nError inesperado: {e}")
+
 
 if __name__ == "__main__":
     main()

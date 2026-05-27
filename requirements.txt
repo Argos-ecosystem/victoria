@@ -1,4 +1,12 @@
 flask
+flask-cors
 pymongo
 python-dotenv
 requests
+urllib3<2
+openai
+google-genai
+numpy
+sounddevice
+soundfile
+SpeechRecognition

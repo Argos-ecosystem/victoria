@@ -61,7 +61,7 @@ python preCalcultator.py
 It uses the following cache types (stored under the Mongo field `tipo`): `actual`, `tres`, `dia`, `ayer`.
 
 ## Running the API server
-Read-only server that returns the cached reports. Default port: `8888`.
+Server that returns cached reports and runs on-demand event analysis. Default port: `8888`.
 ```bash
 python server.py
 ```
@@ -71,6 +71,7 @@ Endpoints (all expect `apikey` query parameter):
 - `/informe_tres` and `/report/three-hours`
 - `/informe_dia` and `/report/day`
 - `/informe_ayer` and `/report/yesterday`
+- `POST /analyze/on-demand` with JSON `{"minutes": 60, "prompt": "..."}`. This reads MongoDB events from the requested range, sorts them by `timestamp`, removes duplicates, sends them to `gpt-4o-mini` by default, and asks for a summary of about `200` characters.
 
 ## Running the voice interface
 Victoria Voice records a short prompt, plays a system sound before recording, prepares the audio for ASR, transcribes it with Gemini 2.5 Flash by default, and uses `gpt-4o-mini` function calling to query `/analyze/on-demand` when the user asks about events.

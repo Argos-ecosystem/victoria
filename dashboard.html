@@ -160,7 +160,13 @@
 
     <script>
       const DEFAULT_APIKEY = "aOhSfdBLPFEXC2HJlXPpT8AQ5wKVc";
-      const BASE_URL = "http://localhost:8888";
+      const params = new URLSearchParams(window.location.search);
+      const API_BASE_PARAM = params.get("apiBase");
+      const BASE_URL = API_BASE_PARAM || (
+        window.location.protocol.startsWith("http")
+          ? window.location.origin
+          : "http://localhost:8888"
+      );
 
       // Init date to today
       const today = new Date().toISOString().split("T")[0];

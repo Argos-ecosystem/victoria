@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 app = Flask(__name__)
+CORS(app)
 
 # ===== CONFIG =====
 MONGO_URI = os.getenv("MONGO_URI")
@@ -18,6 +19,11 @@ EVENTS_COLL = os.getenv("MONGO_COLL_NAME", "events")
 APIKEY = os.getenv("VICTORIA_APIKEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+
+try:
+    SUMMARY_MAX_CHARS = int(os.getenv("SUMMARY_MAX_CHARS", "200"))
+except ValueError:
+    SUMMARY_MAX_CHARS = 200
 
 mongo = MongoClient(MONGO_URI)
 col_cache = mongo[MONGO_DB_CACHE][CACHE_COLL]
@@ -35,7 +41,8 @@ else:
 # ======================
 
 def is_apikey_valid(req) -> bool:
-    return req.args.get("apikey") == APIKEY
+    requested_key = req.args.get("apikey")
+    return bool(APIKEY) and bool(requested_key) and requested_key == APIKEY
 
 def sanitize(text: str) -> str:
     if not text:
@@ -47,6 +54,29 @@ def sanitize(text: str) -> str:
             .replace('"', "")
             .replace("'", "")
             .strip()
+    )
+
+def normalize_event(doc: dict) -> dict:
+    event = dict(doc)
+    event.pop("_id", None)
+    if "timestamp" in event and hasattr(event["timestamp"], "isoformat"):
+        event["timestamp"] = event["timestamp"].isoformat()
+    return event
+
+def event_fingerprint(event: dict) -> str:
+    comparable = {k: v for k, v in event.items() if k != "timestamp"}
+    return json.dumps(comparable, ensure_ascii=False, sort_keys=True, default=str)
+
+def build_analysis_prompt(user_prompt: str) -> str:
+    base_prompt = os.getenv(
+        "PROMPT_ANALYSIS",
+        "Eres un analista de eventos; identifica hechos relevantes y genera un resumen muy breve, directo y sin explicaciones extensas."
+    )
+    return (
+        f"{base_prompt}\n"
+        f"Consulta del usuario: {user_prompt}\n"
+        f"Responde en espanol, en aproximadamente {SUMMARY_MAX_CHARS} caracteres. "
+        "Prioriza lo mas relevante, no inventes datos y considera que los eventos ya vienen ordenados cronologicamente y sin duplicados."
     )
 
 # ======================
@@ -111,10 +141,16 @@ def analyze_on_demand():
         return {"error": "Invalid apikey"}, 403
 
     data = request.get_json() or {}
-    minutes = int(data.get("minutes", 60))
-    # Option to use the base prompt and concatenate, or override completely
-    base_prompt = os.getenv("PROMPT_ANALYSIS", "Eres un analista de eventos; identifica hechos relevantes y genera un resumen muy breve, directo y sin explicaciones extensas.")
-    custom_prompt = data.get("prompt", base_prompt)
+    try:
+        minutes = int(data.get("minutes", 60))
+    except (TypeError, ValueError):
+        return {"error": "minutes must be an integer"}, 400
+
+    if minutes <= 0:
+        return {"error": "minutes must be greater than zero"}, 400
+
+    custom_prompt = data.get("prompt") or "Resume los eventos relevantes de forma breve."
+    analysis_prompt = build_analysis_prompt(custom_prompt)
 
     if not client:
          return {"error": "OpenAI API Key is missing or invalid in server."}, 500
@@ -123,13 +159,18 @@ def analyze_on_demand():
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
     
     docs = col_events.find({"timestamp": {"$gte": cutoff}}).sort("timestamp", 1)
-    
+
     events = []
+    seen = set()
+    duplicates_removed = 0
     for d in docs:
-        d.pop("_id", None)
-        if "timestamp" in d and hasattr(d["timestamp"], "isoformat"):
-            d["timestamp"] = d["timestamp"].isoformat()
-        events.append(d)
+        event = normalize_event(d)
+        fingerprint = event_fingerprint(event)
+        if fingerprint in seen:
+            duplicates_removed += 1
+            continue
+        seen.add(fingerprint)
+        events.append(event)
         
     if not events:
         return {"result": "No hay eventos registrados en este rango de tiempo.", "events_count": 0}
@@ -142,14 +183,16 @@ def analyze_on_demand():
         response = client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[
-                {"role": "system", "content": custom_prompt},
+                {"role": "system", "content": analysis_prompt},
                 {"role": "user", "content": f"Eventos:\n{json.dumps(events, ensure_ascii=False)}"}
-            ]
+            ],
+            max_tokens=120
         )
         texto = response.choices[0].message.content
         return {
             "minutes": minutes,
             "events_count": len(events),
+            "duplicates_removed": duplicates_removed,
             "result": sanitize(texto)
         }
     except Exception as e:

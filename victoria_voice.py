@@ -51,7 +51,6 @@ GEMINI_TRANSCRIBE_MODEL = os.getenv("GEMINI_TRANSCRIBE_MODEL", "gemini-2.5-flash
 VICTORIA_URL = os.getenv("VICTORIA_URL", "http://localhost:8888/analyze/custom")
 RECORDING_SOUND = os.getenv("VICTORIA_RECORDING_SOUND", "/System/Library/Sounds/Ping.aiff")
 VICTORIA_API_MAX_CHARS = os.getenv("VICTORIA_API_MAX_CHARS", "200").strip()
-DEFAULT_QUERY_MINUTES = int(os.getenv("VICTORIA_DEFAULT_QUERY_MINUTES", "720"))
 GOOGLE_ASR_LANGUAGES = [
     lang.strip()
     for lang in os.getenv("VICTORIA_GOOGLE_ASR_LANGUAGES", "es-CL,es-ES,es-419").split(",")
@@ -78,6 +77,10 @@ if not OPENAI_API_KEY:
     print("Error: falta OPENAI_API_KEY en el archivo .env.")
     raise SystemExit(1)
 
+if not VICTORIA_APIKEY:
+    print("Error: falta VICTORIA_APIKEY en el archivo .env.")
+    raise SystemExit(1)
+
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 WAKE_SOUND_FILE = "/System/Library/Sounds/Glass.aiff"
@@ -97,7 +100,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "consultar_servidor_victoria",
-            "description": "Consulta la API configurada con la pregunta del usuario y devuelve una respuesta breve.",
+            "description": "Consulta los eventos recientes de Victoria y devuelve un analisis breve.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -139,20 +142,6 @@ def format_omnistatus_response(data: dict) -> str:
     return json.dumps(data, ensure_ascii=False)
 
 
-def print_api_trace(method: str, url: str, payload: dict, response_data=None):
-    if response_data is None:
-        print("\n========== Omnistatus Request ==========")
-        print(f"{method} {url}")
-        print("Content-Type: application/json")
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        print("========================================\n")
-        return
-
-    print("\n========== Omnistatus Response =========")
-    print(json.dumps(response_data, ensure_ascii=False, indent=2))
-    print("========================================\n")
-
-
 def build_api_prompt(prompt: str) -> str:
     prompt = (prompt or "").strip()
     if not VICTORIA_API_MAX_CHARS:
@@ -173,20 +162,17 @@ def build_api_prompt(prompt: str) -> str:
 def consultar_servidor_victoria(minutos: int, prompt: str) -> str:
     hours = minutes_to_hours(minutos)
     api_prompt = build_api_prompt(prompt)
+    print(f"[Function Call] hours={hours} | minutos={minutos} | prompt='{api_prompt}'")
 
-    payload = {"hours": hours, "prompt": api_prompt}
-    headers = {
-        "Content-Type": "application/json",
-        "ngrok-skip-browser-warning": "true",
-    }
-    url = normalize_victoria_url(VICTORIA_URL)
+    params = {"hours": hours, "prompt": api_prompt}
+    if VICTORIA_APIKEY:
+        params["apikey"] = VICTORIA_APIKEY
+    headers = {"ngrok-skip-browser-warning": "true"}
 
     try:
-        print_api_trace("POST", url, payload)
-        response = requests.post(url, json=payload, headers=headers, timeout=60)
+        response = requests.get(normalize_victoria_url(VICTORIA_URL), params=params, headers=headers, timeout=60)
         response.raise_for_status()
         data = response.json()
-        print_api_trace("POST", url, payload, data)
         return format_omnistatus_response(data)
     except Exception as e:
         return f"Error en la consulta a Omnistatus: {e}"
@@ -339,9 +325,9 @@ def transcribe_audio_openai(filename):
                 file=audio_file,
                 language="es",
                 prompt=(
-                    "Victoria es una asistente para consultar una API con preguntas del usuario. "
-                    "El usuario puede pedir actividad reciente, registros, estado, presencia, "
-                    "incidentes, reportes, resumenes, ultimos minutos, ultimas horas, hoy o ayer."
+                    "Victoria es una asistente para consultar eventos recientes. "
+                    "El usuario suele pedir resumenes, eventos, incidentes, reportes, "
+                    "ultimos minutos, ultimas horas, hoy o ayer."
                 ),
             )
         text = clean_transcript(response.text)
@@ -432,9 +418,9 @@ def transcribe_audio_gemini(filename):
                         "Transcribe exactamente la voz humana en este audio. El idioma esperado es español "
                         "latinoamericano, probablemente chileno. No traduzcas, no corrijas la intención y no "
                         "agregues comentarios. Si no hay habla clara, devuelve exactamente [NO_SPEECH]. "
-                        "Contexto: el usuario le habla a Victoria para consultar una API sobre actividad, "
-                        "registros, estado, presencia, incidentes, reportes o periodos recientes; puede decir "
-                        "frases con ultimos minutos, ultimas horas, hoy o ayer. "
+                        "Contexto: el usuario le habla a Victoria para pedir resumenes de eventos, incidentes, "
+                        "reportes o actividad reciente; puede decir frases como revisa los eventos, dame un "
+                        "resumen, ultimos minutos, ultimas horas, hoy o ayer. "
                         "Devuelve solo la transcripción."
                     ),
                     audio_file,
@@ -568,14 +554,14 @@ def run_tool_call(tool_call, user_prompt: str):
     except json.JSONDecodeError as e:
         return f"Argumentos invalidos para tool call: {e}"
 
-    minutos = int(args.get("minutos", DEFAULT_QUERY_MINUTES))
+    minutos = int(args.get("minutos", 60))
     prompt = user_prompt.strip()
     if not prompt:
         prompt = (args.get("prompt") or "").strip()
     return consultar_servidor_victoria(minutos=minutos, prompt=prompt)
 
 
-def ask_openai(prompt_text, minutes=DEFAULT_QUERY_MINUTES):
+def ask_openai(prompt_text, minutes=60):
     print(f"Analizando intencion con OpenAI ({OPENAI_VOICE_MODEL}) y function calling...")
 
     messages = [
@@ -583,13 +569,11 @@ def ask_openai(prompt_text, minutes=DEFAULT_QUERY_MINUTES):
             "role": "system",
             "content": (
                 "Eres Victoria, una asistente de voz inteligente, concisa y conversacional. "
-                "Si el usuario hace una consulta que deba resolverse con informacion del API configurada, "
-                "usa la herramienta consultar_servidor_victoria. Esto incluye actividad reciente, registros, "
-                "estado, presencia, reportes, resumenes, incidentes o preguntas sobre un periodo. "
-                "Debes inferir el parametro minutos desde el texto: "
+                "Si el usuario pregunta por eventos, reportes, resumenes, incidentes o actividad reciente, "
+                "usa la herramienta consultar_servidor_victoria. Debes inferir el parametro minutos desde el texto: "
                 "15 minutos = 15, media hora = 30, una hora = 60, dos horas = 120, tres horas = 180, "
                 "hoy o el dia = 1440, ayer = 2880. Si el usuario no especifica tiempo, "
-                f"asume {minutes} minutos (12 horas por defecto). Cuando llames la herramienta, el campo prompt debe ser exactamente "
+                f"asume {minutes} minutos. Cuando llames la herramienta, el campo prompt debe ser exactamente "
                 "el texto del usuario, sin resumirlo, corregirlo ni reescribirlo. "
                 "Tus respuestas finales deben ser cortas y naturales para voz."
             ),
@@ -649,13 +633,7 @@ def speak_text(text):
 def main():
     parser = argparse.ArgumentParser(description="Victoria Voice Interface")
     parser.add_argument("-d", "--duration", type=int, default=6, help="Duracion de la grabacion en segundos.")
-    parser.add_argument(
-        "-m",
-        "--minutes",
-        type=int,
-        default=DEFAULT_QUERY_MINUTES,
-        help="Minutos por defecto para consultar eventos cuando la frase no indica rango. Default: 720.",
-    )
+    parser.add_argument("-m", "--minutes", type=int, default=60, help="Minutos por defecto para consultar eventos.")
     parser.add_argument(
         "--asr",
         choices=["openai"],

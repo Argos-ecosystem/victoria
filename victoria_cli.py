@@ -13,7 +13,7 @@ VICTORIA_APIKEY = os.getenv("VICTORIA_APIKEY")
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Victoria CLI - Consulta la API existente de Victoria sin tocar el backend"
+        description="Victoria CLI - Consulta la API existente de Victoria"
     )
     parser.add_argument(
         "-p", "--prompt",
@@ -65,13 +65,14 @@ def main():
         "prompt": prompt,
     }
     params = {"apikey": apikey}
+    headers = {"ngrok-skip-browser-warning": "true"}
 
     print(f"🌐 Consultando Victoria en {args.url}...")
     print(f"⏱️  Minutos: {args.minutes}")
     print(f"📝 Prompt: {prompt}\n")
 
     try:
-        response = requests.post(args.url, params=params, json=payload, timeout=30)
+        response = requests.post(args.url, params=params, json=payload, headers=headers, timeout=30)
         response.raise_for_status()
         data = response.json()
     except requests.RequestException as exc:

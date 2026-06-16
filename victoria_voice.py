@@ -109,7 +109,10 @@ def consultar_servidor_victoria(minutos: int, prompt: str) -> str:
 
     payload = {"minutes": minutos, "prompt": prompt}
     params = {"apikey": VICTORIA_APIKEY}
-    headers = {"Content-Type": "application/json"}
+    headers = {
+        "Content-Type": "application/json",
+        "ngrok-skip-browser-warning": "true"
+    }
 
     try:
         response = requests.post(VICTORIA_URL, params=params, json=payload, headers=headers, timeout=30)

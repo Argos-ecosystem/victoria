@@ -1,93 +1,103 @@
-# Victoria Reports
+# Victoria
 
-Small set of scripts to pre-calculate short reports from MongoDB events using OpenAI and expose the cached results through a lightweight Flask API.
+Victoria is the voice and CLI client for Omnistatus event analysis.
 
-## Features
-- Pulls events from MongoDB and groups similar entries with fast fingerprints.
-- Generates summaries with OpenAI models for four time windows: current event, last 3 hours, last 24 hours, and yesterday.
-- Caches results in MongoDB to avoid unnecessary recomputation and keeps a history collection.
-- Exposes read-only HTTP endpoints (Spanish legacy paths plus English aliases) for voice assistants or other clients.
+Omnistatus owns the event storage, filtering, compression, model call, and final analysis response. Victoria only transcribes user intent, calls the Omnistatus API, and speaks or prints the response.
 
 ## Requirements
-- Python 3.10+
-- MongoDB accessible through `MONGO_URI`
-- OpenAI API key with access to the configured models
 
-Install Python dependencies:
+- Python 3.10+
+- OpenAI API key for voice intent, transcription, and TTS
+- Omnistatus API reachable through `VICTORIA_URL`
+
+Install dependencies:
+
 ```bash
 pip install -r requirements.txt
 ```
 
-## Environment Variables
-Set these before running either service:
+## Environment
 
 | Variable | Purpose |
 | --- | --- |
-| `OPENAI_API_KEY` | API key for OpenAI. |
-| `GEMINI_API_KEY` | API key for Gemini voice transcription. |
-| `PROMPT_ANALYSIS` | System prompt used to steer the event analysis. |
-| `MONGO_URI` | Mongo connection URI. |
-| `MONGO_DB_NAME` | Database name. |
-| `MONGO_COLL_NAME` | Collection containing raw events with a `timestamp` field. |
-| `VICTORIA_APIKEY` | Shared secret for the Flask API. |
+| `OPENAI_API_KEY` | API key for OpenAI voice features. |
+| `OPENAI_VOICE_MODEL` | Model used for voice intent and tool calling. Default: `gpt-4o-mini`. |
+| `OPENAI_TRANSCRIBE_MODEL` | Model used for audio transcription. Default: `whisper-1`. |
+| `OPENAI_TTS_MODEL` | Model used for speech output. Default: `gpt-4o-mini-tts`. |
+| `OPENAI_TTS_VOICE` | TTS voice. Default: `coral`. |
+| `VICTORIA_URL` | Omnistatus endpoint. Example: `http://host:8001/analyze/custom`. |
+| `VICTORIA_APIKEY` | Optional legacy API key. Not sent to `/analyze/custom`. |
+| `VICTORIA_API_MAX_CHARS` | Max response length appended to the API prompt. Default: `200`; use `0` or empty to disable. |
+| `VICTORIA_DEFAULT_QUERY_MINUTES` | Voice fallback range when the user does not specify time. Default: `720` (12 hours). |
+| `VICTORIA_DEFAULT_QUERY_HOURS` | CLI fallback range when no `--hours` or `--minutes` is provided. Default: `12`. |
 
-Optional tuning:
-- `MODEL_ACTUAL` (default `gpt-4o-mini`)
-- `MODEL_TRES` (default `gpt-4o-mini`)
-- `MODEL_DIA` (default `gpt-4o-mini`)
-- `MODEL_AYER` (default `gpt-4.1`)
-- `OPENAI_MODEL` (default `gpt-4o-mini`, used by `/analyze/on-demand`)
-- `OPENAI_VOICE_MODEL` (default `gpt-4o-mini`, used by `victoria_voice.py` for function calling)
-- `OPENAI_TRANSCRIBE_MODEL` (default `whisper-1`)
-- `OPENAI_TTS_MODEL` (default `gpt-4o-mini-tts`)
-- `OPENAI_TTS_VOICE` (default `coral`)
-- `OPENAI_TTS_INSTRUCTIONS` (default: Spanish Latin American voice with a soft Chilean accent)
-- `OPENAI_TTS_SPEED` (default `1.03`)
-- `GEMINI_TRANSCRIBE_MODEL` (default `gemini-2.5-flash`)
-- `VICTORIA_ASR` (default `gemini`; options: `gemini`, `google`, `openai`, `local`)
-- `VICTORIA_GOOGLE_ASR_LANGUAGES` (default `es-CL,es-ES,es-419`)
-- `VICTORIA_LOCAL_ASR_MODEL` (default `tiny`; optional local faster-whisper model)
-- `VICTORIA_LOCAL_ASR_TIMEOUT_SECONDS` (default `60`; after this, local ASR falls back)
-- `VICTORIA_RECORDING_SOUND` (default `/System/Library/Sounds/Ping.aiff`)
-- `CYCLE_SLEEP_SECONDS` (default `600`)
-- `REQUEST_TIMEOUT_SECONDS` (default `40`)
+## Omnistatus API
 
-## Running the pre-calculator
-This loop fetches events, calls OpenAI when the input changes, and stores the results in `victoria_cache` plus a history in `victoria_cache_history`.
-```bash
-python preCalcultator.py
+Victoria calls:
+
+```http
+POST /analyze/custom
+Content-Type: application/json
 ```
 
-It uses the following cache types (stored under the Mongo field `tipo`): `actual`, `tres`, `dia`, `ayer`.
-
-## Running the API server
-Server that returns cached reports and runs on-demand event analysis. Default port: `8888`.
-```bash
-python server.py
+```json
+{
+  "hours": 6,
+  "prompt": "Dime si hubo errores criticos en este periodo"
+}
 ```
 
-Endpoints (all expect `apikey` query parameter):
-- `/informe_actual` and `/report/current`
-- `/informe_tres` and `/report/three-hours`
-- `/informe_dia` and `/report/day`
-- `/informe_ayer` and `/report/yesterday`
-- `POST /analyze/on-demand` with JSON `{"minutes": 60, "prompt": "..."}`. This reads MongoDB events from the requested range, sorts them by `timestamp`, removes duplicates, sends them to `gpt-4o-mini` by default, and asks for a summary of about `200` characters.
+Parameters:
 
-## Running the voice interface
-Victoria Voice records a short prompt, plays a system sound before recording, prepares the audio for ASR, transcribes it with Gemini 2.5 Flash by default, and uses `gpt-4o-mini` function calling to query `/analyze/on-demand` when the user asks about events.
+| Param | Type | Description |
+| --- | --- | --- |
+| `hours` | int, 1-168 | Hours backwards to search events in Mongo. |
+| `prompt` | string | Custom analysis prompt. |
 
-Start the Flask API first, then run:
+Expected response fields:
+
+```json
+{
+  "status": "ok",
+  "score": 0,
+  "msg": "Resumen breve del analisis",
+  "events_count": 0,
+  "window_hours": 6
+}
+```
+
+## CLI
+
+```bash
+python3 victoria_cli.py --hours 6 --prompt "Dime si hubo errores criticos en este periodo"
+```
+
+`--minutes` is still accepted for old commands and is converted to hours. If no range is provided, the CLI asks for the last 12 hours.
+
+## Voice
+
+```bash
+python3 victoria_voice.py
+```
+
+The voice flow waits for the wake word `Victoria`, records the question, infers a time range, uses 12 hours when no range is clear, converts it to `hours`, calls Omnistatus, and speaks the `msg` field from the response.
+
+To skip the wake word and record immediately:
+
 ```bash
 python3 victoria_voice.py --no-wakeword
 ```
 
-To use a different ASR:
+To start recording with a headset media button instead of Enter:
+
 ```bash
-python3 victoria_voice.py --no-wakeword --asr openai
+python3 victoria_voice.py --no-wakeword --trigger media
 ```
 
-Gemini 2.5 Flash ASR is the default. Victoria normalizes/trims the audio before transcription and ignores obvious junk transcripts. Google ASR remains available with `--asr google`, and Victoria falls back to Google/OpenAI if Gemini fails. Function calling still runs through `gpt-4o-mini` after the audio is transcribed.
+To check whether macOS exposes the headset button to Victoria:
 
-## Notes
-- Hashes used for cache comparison are now deterministic (`sha256` over sorted JSON) so the process does not recompute unnecessarily after restarts.
-- Mongo field names remain in Spanish (`tipo`, `texto`) for compatibility with existing data; code and logs are now in English.
+```bash
+python3 victoria_voice.py --debug-keys
+```
+
+Press the headset button once. If the output says `TRIGGER`, `--trigger media` should work. On macOS, this may require Accessibility permission for the terminal app. If the headset button is not exposed as a media key, Victoria falls back to Enter.

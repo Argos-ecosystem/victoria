@@ -1,8 +1,11 @@
 import argparse
 import json
 import os
+import select
 import signal
 import subprocess
+import sys
+import threading
 import warnings
 
 import openai
@@ -31,27 +34,24 @@ try:
 except ImportError:
     WhisperModel = None
 
+try:
+    from pynput import keyboard
+except ImportError:
+    keyboard = None
+
 
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_VOICE_MODEL = os.getenv("OPENAI_VOICE_MODEL", "gpt-4o-mini")
 OPENAI_TRANSCRIBE_MODEL = os.getenv("OPENAI_TRANSCRIBE_MODEL", "whisper-1")
-OPENAI_TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
-OPENAI_TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "coral")
-OPENAI_TTS_INSTRUCTIONS = os.getenv(
-    "OPENAI_TTS_INSTRUCTIONS",
-    (
-        "Habla en español latinoamericano natural, con acento chileno suave y cercano. "
-        "Mantén una voz cálida, clara, calmada y conversacional. Evita sonar como locución neutra corporativa."
-    ),
-)
-OPENAI_TTS_SPEED = float(os.getenv("OPENAI_TTS_SPEED", "1.03"))
+VICTORIA_APIKEY = os.getenv("VICTORIA_APIKEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_TRANSCRIBE_MODEL = os.getenv("GEMINI_TRANSCRIBE_MODEL", "gemini-2.5-flash")
-VICTORIA_APIKEY = os.getenv("VICTORIA_APIKEY")
-VICTORIA_URL = os.getenv("VICTORIA_URL", "http://localhost:8888/analyze/on-demand")
+VICTORIA_URL = os.getenv("VICTORIA_URL", "http://localhost:8888/analyze/custom")
 RECORDING_SOUND = os.getenv("VICTORIA_RECORDING_SOUND", "/System/Library/Sounds/Ping.aiff")
+VICTORIA_API_MAX_CHARS = os.getenv("VICTORIA_API_MAX_CHARS", "200").strip()
+DEFAULT_QUERY_MINUTES = int(os.getenv("VICTORIA_DEFAULT_QUERY_MINUTES", "720"))
 GOOGLE_ASR_LANGUAGES = [
     lang.strip()
     for lang in os.getenv("VICTORIA_GOOGLE_ASR_LANGUAGES", "es-CL,es-ES,es-419").split(",")
@@ -65,36 +65,54 @@ BAD_TRANSCRIPT_MARKERS = (
     "subtitulos realizados",
     "subtítulos realizados",
     "gracias por ver",
+    "biberón",
+    "biberon",
+    "canal de subtítulos",
+    "canal de subtitulos",
+    "iglesia de jesucristo",
+    "santos de los últimos días",
+    "santos de los ultimos dias",
 )
 
 if not OPENAI_API_KEY:
     print("Error: falta OPENAI_API_KEY en el archivo .env.")
     raise SystemExit(1)
 
-if not VICTORIA_APIKEY:
-    print("Error: falta VICTORIA_APIKEY en el archivo .env.")
-    raise SystemExit(1)
-
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
-gemini_client = genai.Client(api_key=GEMINI_API_KEY) if genai and GEMINI_API_KEY else None
-local_whisper_model = None
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+WAKE_SOUND_FILE = "/System/Library/Sounds/Glass.aiff"
+OPENAI_TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
+OPENAI_TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "coral")
+OPENAI_TTS_INSTRUCTIONS = os.getenv(
+    "OPENAI_TTS_INSTRUCTIONS",
+    (
+        "Habla en espanol latinoamericano natural, con acento chileno suave y cercano. "
+        "Manten una voz calida, clara, calmada y conversacional. Evita sonar como locucion neutra corporativa."
+    ),
+)
+OPENAI_TTS_SPEED = float(os.getenv("OPENAI_TTS_SPEED", "1.03"))
 
 TOOLS = [
     {
         "type": "function",
         "function": {
             "name": "consultar_servidor_victoria",
-            "description": "Consulta los eventos recientes de Victoria y devuelve un analisis breve.",
+            "description": "Consulta la API configurada con la pregunta del usuario y devuelve una respuesta breve.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "minutos": {
                         "type": "integer",
-                        "description": "Rango de tiempo en minutos. Ejemplos: ultima hora = 60, dos horas = 120.",
+                        "description": (
+                            "Rango de tiempo en minutos inferido desde lo que pidio el usuario. "
+                            "Ejemplos: ultimos 15 minutos = 15, ultima hora = 60, dos horas = 120, "
+                            "tres horas = 180, hoy o el dia = 1440, ayer = 2880. "
+                            "Si el usuario no menciona tiempo, usa el valor por defecto indicado por el sistema."
+                        ),
                     },
                     "prompt": {
                         "type": "string",
-                        "description": "Instruccion clara para analizar los eventos segun lo que pidio el usuario.",
+                        "description": "Texto exacto dicho por el usuario, sin resumir ni reescribir.",
                     },
                 },
                 "required": ["minutos", "prompt"],
@@ -103,24 +121,75 @@ TOOLS = [
     }
 ]
 
+def normalize_victoria_url(url: str) -> str:
+    if url.endswith("/analyze/on-demand"):
+        return url[: -len("/analyze/on-demand")] + "/analyze/custom"
+    return url
 
-def consultar_servidor_victoria(minutos: int, prompt: str) -> str:
-    print(f"[Function Call] minutos={minutos} | prompt='{prompt}'")
 
-    payload = {"minutes": minutos, "prompt": prompt}
-    params = {"apikey": VICTORIA_APIKEY}
-    headers = {
-        "Content-Type": "application/json",
-        "ngrok-skip-browser-warning": "true"
-    }
+def minutes_to_hours(minutes: int) -> int:
+    hours = max(1, (max(1, minutes) + 59) // 60)
+    return min(hours, 168)
+
+
+def format_omnistatus_response(data: dict) -> str:
+    msg = data.get("msg") or data.get("result")
+    if msg:
+        return msg
+    return json.dumps(data, ensure_ascii=False)
+
+
+def print_api_trace(method: str, url: str, payload: dict, response_data=None):
+    if response_data is None:
+        print("\n========== Omnistatus Request ==========")
+        print(f"{method} {url}")
+        print("Content-Type: application/json")
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        print("========================================\n")
+        return
+
+    print("\n========== Omnistatus Response =========")
+    print(json.dumps(response_data, ensure_ascii=False, indent=2))
+    print("========================================\n")
+
+
+def build_api_prompt(prompt: str) -> str:
+    prompt = (prompt or "").strip()
+    if not VICTORIA_API_MAX_CHARS:
+        return prompt
 
     try:
-        response = requests.post(VICTORIA_URL, params=params, json=payload, headers=headers, timeout=30)
+        max_chars = int(VICTORIA_API_MAX_CHARS)
+    except ValueError:
+        print(f"Aviso: VICTORIA_API_MAX_CHARS invalido: {VICTORIA_API_MAX_CHARS!r}.")
+        return prompt
+
+    if max_chars <= 0:
+        return prompt
+
+    return f"{prompt}\n\nResponde en maximo {max_chars} caracteres."
+
+
+def consultar_servidor_victoria(minutos: int, prompt: str) -> str:
+    hours = minutes_to_hours(minutos)
+    api_prompt = build_api_prompt(prompt)
+
+    payload = {"hours": hours, "prompt": api_prompt}
+    headers = {
+        "Content-Type": "application/json",
+        "ngrok-skip-browser-warning": "true",
+    }
+    url = normalize_victoria_url(VICTORIA_URL)
+
+    try:
+        print_api_trace("POST", url, payload)
+        response = requests.post(url, json=payload, headers=headers, timeout=60)
         response.raise_for_status()
         data = response.json()
-        return data.get("result") or json.dumps(data, ensure_ascii=False)
+        print_api_trace("POST", url, payload, data)
+        return format_omnistatus_response(data)
     except Exception as e:
-        return f"Error en la consulta al servidor Victoria: {e}"
+        return f"Error en la consulta a Omnistatus: {e}"
 
 
 def play_recording_sound():
@@ -131,6 +200,14 @@ def play_recording_sound():
         subprocess.run(["afplay", RECORDING_SOUND], check=False)
     except Exception as e:
         print(f"Aviso: no se pudo reproducir el sonido de grabacion: {e}")
+
+
+def play_wake_sound():
+    try:
+        subprocess.run(["afplay", WAKE_SOUND_FILE], check=True)
+    except Exception:
+        # Si falla el sonido del sistema, se ignora y se continúa
+        pass
 
 
 def wait_for_wakeword():
@@ -161,6 +238,83 @@ def wait_for_wakeword():
                 return
 
 
+def is_media_trigger_key(key) -> bool:
+    key_name = getattr(key, "name", "") or str(key)
+    key_name = key_name.lower()
+    return any(
+        token in key_name
+        for token in (
+            "media",
+            "media_play_pause",
+            "play_pause",
+            "media_play",
+            "media_next",
+            "media_previous",
+            "volume_up",
+            "volume_down",
+            "volume_mute",
+        )
+    )
+
+
+def describe_key(key) -> str:
+    key_name = getattr(key, "name", None)
+    return f"{key!r} name={key_name!r}"
+
+
+def debug_keys():
+    if keyboard is None:
+        print("pynput no esta instalado; no puedo escuchar teclas del manos libres.")
+        return
+
+    print("Presiona el boton del manos libres. Ctrl+C para salir.")
+
+    def on_press(key):
+        trigger = "TRIGGER" if is_media_trigger_key(key) else "ignore"
+        print(f"{trigger}: {describe_key(key)}", flush=True)
+        return None
+
+    with keyboard.Listener(on_press=on_press) as listener:
+        listener.join()
+
+
+def wait_for_media_button():
+    if keyboard is None:
+        print("\npynput no esta instalado; usando Enter como fallback.")
+        input("Presiona Enter para grabar...")
+        return
+
+    pressed = threading.Event()
+
+    def on_press(key):
+        if is_media_trigger_key(key):
+            pressed.set()
+            return False
+        return None
+
+    print("\nPresiona el boton del manos libres para grabar. Enter tambien sirve.")
+    listener = keyboard.Listener(on_press=on_press)
+    listener.start()
+    try:
+        while not pressed.is_set():
+            readable, _, _ = select.select([sys.stdin], [], [], 0.1)
+            if readable:
+                line = sys.stdin.readline()
+                if line == "":
+                    raise EOFError
+                pressed.set()
+    finally:
+        listener.stop()
+        listener.join(timeout=1)
+
+
+def wait_for_record_trigger(trigger: str):
+    if trigger == "media":
+        wait_for_media_button()
+        return
+    input("\nPresiona Enter para grabar...")
+
+
 def record_audio(filename="temp_query.wav", duration=5, fs=44100):
     print(f"\nGrabando por {duration} segundos. Habla ahora.")
     play_recording_sound()
@@ -174,14 +328,24 @@ def record_audio(filename="temp_query.wav", duration=5, fs=44100):
 def transcribe_audio_openai(filename):
     print(f"Transcribiendo audio con OpenAI ({OPENAI_TRANSCRIBE_MODEL})...")
     try:
-        with open(filename, "rb") as audio_file:
+        if audio_is_too_quiet(filename):
+            print("Audio demasiado bajo para transcribir.")
+            return ""
+
+        prepared_filename = prepare_audio_for_asr(filename, suffix="openai")
+        with open(prepared_filename, "rb") as audio_file:
             response = client.audio.transcriptions.create(
                 model=OPENAI_TRANSCRIBE_MODEL,
                 file=audio_file,
                 language="es",
+                prompt=(
+                    "Victoria es una asistente para consultar una API con preguntas del usuario. "
+                    "El usuario puede pedir actividad reciente, registros, estado, presencia, "
+                    "incidentes, reportes, resumenes, ultimos minutos, ultimas horas, hoy o ayer."
+                ),
             )
-        text = response.text.strip()
-        print(f"Tu: '{text}'")
+        text = clean_transcript(response.text)
+        print(f"Tu (OpenAI): '{text}'")
         return text
     except Exception as e:
         print(f"Error en transcripcion OpenAI: {e}")
@@ -218,6 +382,22 @@ def prepare_audio_for_asr(filename, suffix="asr"):
         return filename
 
 
+def audio_is_too_quiet(filename):
+    try:
+        audio, _ = sf.read(filename, dtype="float32")
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        audio = np.nan_to_num(audio)
+        if not audio.size:
+            return True
+        rms = float(np.sqrt(np.mean(np.square(audio))))
+        peak = float(np.max(np.abs(audio)))
+        return rms < 0.0015 and peak < 0.02
+    except Exception as e:
+        print(f"Aviso: no se pudo medir volumen de audio: {e}")
+        return False
+
+
 def clean_transcript(text):
     text = (text or "").strip().strip('"').strip("'").strip()
     if not text:
@@ -237,6 +417,10 @@ def transcribe_audio_gemini(filename):
 
     print(f"Transcribiendo audio con Gemini Flash ({GEMINI_TRANSCRIBE_MODEL})...")
     try:
+        if audio_is_too_quiet(filename):
+            print("Audio demasiado bajo para transcribir.")
+            return ""
+
         prepared_filename = prepare_audio_for_asr(filename, suffix="gemini")
         audio_file = gemini_client.files.upload(file=prepared_filename)
         try:
@@ -248,6 +432,9 @@ def transcribe_audio_gemini(filename):
                         "Transcribe exactamente la voz humana en este audio. El idioma esperado es español "
                         "latinoamericano, probablemente chileno. No traduzcas, no corrijas la intención y no "
                         "agregues comentarios. Si no hay habla clara, devuelve exactamente [NO_SPEECH]. "
+                        "Contexto: el usuario le habla a Victoria para consultar una API sobre actividad, "
+                        "registros, estado, presencia, incidentes, reportes o periodos recientes; puede decir "
+                        "frases con ultimos minutos, ultimas horas, hoy o ayer. "
                         "Devuelve solo la transcripción."
                     ),
                     audio_file,
@@ -369,34 +556,10 @@ def transcribe_audio_local(filename):
 
 
 def transcribe_audio(filename, asr_provider):
-    if asr_provider == "gemini":
-        text = transcribe_audio_gemini(filename)
-        if text:
-            return text
-        print("Usando Google ASR como fallback de transcripcion.")
-        text = transcribe_audio_google(filename)
-        if text:
-            return text
-        print("Usando OpenAI como fallback de transcripcion.")
-        return transcribe_audio_openai(filename)
-
-    if asr_provider == "google":
-        text = transcribe_audio_google(filename)
-        if text:
-            return text
-        print("Usando OpenAI como fallback de transcripcion.")
-        return transcribe_audio_openai(filename)
-
-    if asr_provider == "local":
-        text = transcribe_audio_local(filename)
-        if text:
-            return text
-        print("Usando OpenAI como fallback de transcripcion.")
-
     return transcribe_audio_openai(filename)
 
 
-def run_tool_call(tool_call):
+def run_tool_call(tool_call, user_prompt: str):
     if tool_call.function.name != "consultar_servidor_victoria":
         return f"Tool desconocida: {tool_call.function.name}"
 
@@ -405,12 +568,14 @@ def run_tool_call(tool_call):
     except json.JSONDecodeError as e:
         return f"Argumentos invalidos para tool call: {e}"
 
-    minutos = int(args.get("minutos", 60))
-    prompt = args.get("prompt") or "Resume los eventos relevantes de forma breve."
+    minutos = int(args.get("minutos", DEFAULT_QUERY_MINUTES))
+    prompt = user_prompt.strip()
+    if not prompt:
+        prompt = (args.get("prompt") or "").strip()
     return consultar_servidor_victoria(minutos=minutos, prompt=prompt)
 
 
-def ask_openai(prompt_text, minutes=60):
+def ask_openai(prompt_text, minutes=DEFAULT_QUERY_MINUTES):
     print(f"Analizando intencion con OpenAI ({OPENAI_VOICE_MODEL}) y function calling...")
 
     messages = [
@@ -418,9 +583,15 @@ def ask_openai(prompt_text, minutes=60):
             "role": "system",
             "content": (
                 "Eres Victoria, una asistente de voz inteligente, concisa y conversacional. "
-                "Si el usuario pregunta por eventos, reportes, resumenes, incidentes o actividad reciente, "
-                "usa la herramienta consultar_servidor_victoria. Si el usuario no especifica tiempo, "
-                f"asume {minutes} minutos. Tus respuestas finales deben ser cortas y naturales para voz."
+                "Si el usuario hace una consulta que deba resolverse con informacion del API configurada, "
+                "usa la herramienta consultar_servidor_victoria. Esto incluye actividad reciente, registros, "
+                "estado, presencia, reportes, resumenes, incidentes o preguntas sobre un periodo. "
+                "Debes inferir el parametro minutos desde el texto: "
+                "15 minutos = 15, media hora = 30, una hora = 60, dos horas = 120, tres horas = 180, "
+                "hoy o el dia = 1440, ayer = 2880. Si el usuario no especifica tiempo, "
+                f"asume {minutes} minutos (12 horas por defecto). Cuando llames la herramienta, el campo prompt debe ser exactamente "
+                "el texto del usuario, sin resumirlo, corregirlo ni reescribirlo. "
+                "Tus respuestas finales deben ser cortas y naturales para voz."
             ),
         },
         {"role": "user", "content": prompt_text},
@@ -443,7 +614,7 @@ def ask_openai(prompt_text, minutes=60):
                 return result_text
 
             for tool_call in message.tool_calls:
-                tool_result = run_tool_call(tool_call)
+                tool_result = run_tool_call(tool_call, prompt_text)
                 messages.append(
                     {
                         "role": "tool",
@@ -461,15 +632,15 @@ def ask_openai(prompt_text, minutes=60):
 def speak_text(text):
     print("Generando voz y reproduciendo...")
     try:
-        response = client.audio.speech.create(
+        tts_filename = "temp_response.mp3"
+        with client.audio.speech.with_streaming_response.create(
             model=OPENAI_TTS_MODEL,
             voice=OPENAI_TTS_VOICE,
             input=text,
             instructions=OPENAI_TTS_INSTRUCTIONS,
             speed=OPENAI_TTS_SPEED,
-        )
-        tts_filename = "temp_response.mp3"
-        response.stream_to_file(tts_filename)
+        ) as response:
+            response.stream_to_file(tts_filename)
         subprocess.run(["afplay", tts_filename], check=False)
     except Exception as e:
         print(f"Error en TTS: {e}")
@@ -478,24 +649,45 @@ def speak_text(text):
 def main():
     parser = argparse.ArgumentParser(description="Victoria Voice Interface")
     parser.add_argument("-d", "--duration", type=int, default=6, help="Duracion de la grabacion en segundos.")
-    parser.add_argument("-m", "--minutes", type=int, default=60, help="Minutos por defecto para consultar eventos.")
+    parser.add_argument(
+        "-m",
+        "--minutes",
+        type=int,
+        default=DEFAULT_QUERY_MINUTES,
+        help="Minutos por defecto para consultar eventos cuando la frase no indica rango. Default: 720.",
+    )
     parser.add_argument(
         "--asr",
-        choices=["gemini", "google", "openai", "local"],
-        default=os.getenv("VICTORIA_ASR", "gemini"),
+        choices=["openai"],
+        default=os.getenv("VICTORIA_ASR", "openai"),
+    )
+    parser.add_argument(
+        "--trigger",
+        choices=["enter", "media"],
+        default=os.getenv("VICTORIA_TRIGGER", "enter"),
+        help="Como iniciar la grabacion cuando se usa --no-wakeword.",
+    )
+    parser.add_argument(
+        "--debug-keys",
+        action="store_true",
+        help="Muestra las teclas que llegan desde el teclado o manos libres y sale con Ctrl+C.",
     )
     parser.add_argument("--no-wakeword", action="store_true", help="Salta la palabra de activacion y graba directo.")
     args = parser.parse_args()
 
+    if args.debug_keys:
+        debug_keys()
+        return
+
     print("========================================")
     print("Victoria Voice Interface Activada")
     print("========================================")
-    print(f"Configuracion: escucha={args.duration}s, eventos={args.minutes}m, asr={args.asr}.")
+    print(f"Configuracion: escucha={args.duration}s, asr={args.asr}, trigger={args.trigger}.")
 
     while True:
         try:
             if args.no_wakeword:
-                input("\nPresiona Enter para grabar...")
+                wait_for_record_trigger(args.trigger)
             else:
                 wait_for_wakeword()
 
@@ -509,6 +701,9 @@ def main():
             speak_text(response_text)
         except KeyboardInterrupt:
             print("\nSaliendo de la interfaz de voz...")
+            break
+        except EOFError:
+            print("\nNo hay entrada interactiva disponible para iniciar la grabacion.")
             break
         except Exception as e:
             print(f"\nError inesperado: {e}")

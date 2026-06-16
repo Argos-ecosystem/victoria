@@ -61,6 +61,21 @@ local_settings.py
 db.sqlite3
 db.sqlite3-journal
 
+# macOS local files
+.DS_Store
+
+# Victoria local runtime and generated audio
+.local-runtime/
+temp_query*.*
+temp_response*.*
+*.wav
+*.mp3
+*.m4a
+*.ogg
+*.flac
+*.aac
+*.webm
+
 # Flask stuff:
 instance/
 .webassets-cache

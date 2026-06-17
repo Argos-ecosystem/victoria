@@ -8,7 +8,7 @@ Omnistatus owns the event storage, filtering, compression, model call, and final
 
 - Python 3.10+
 - OpenAI API key for voice intent, transcription, and TTS
-- Omnistatus API reachable through `VICTORIA_URL`
+- Omnistatus API reachable through `OMNI_URL`
 
 Install dependencies:
 
@@ -25,11 +25,11 @@ pip install -r requirements.txt
 | `OPENAI_TRANSCRIBE_MODEL` | Model used for audio transcription. Default: `whisper-1`. |
 | `OPENAI_TTS_MODEL` | Model used for speech output. Default: `gpt-4o-mini-tts`. |
 | `OPENAI_TTS_VOICE` | TTS voice. Default: `coral`. |
-| `VICTORIA_URL` | Omnistatus endpoint. Example: `http://host:8001/analyze/custom`. |
-| `VICTORIA_APIKEY` | Optional legacy API key. Not sent to `/analyze/custom`. |
-| `VICTORIA_API_MAX_CHARS` | Max response length appended to the API prompt. Default: `200`; use `0` or empty to disable. |
-| `VICTORIA_DEFAULT_QUERY_MINUTES` | Voice fallback range when the user does not specify time. Default: `720` (12 hours). |
-| `VICTORIA_DEFAULT_QUERY_HOURS` | CLI fallback range when no `--hours` or `--minutes` is provided. Default: `12`. |
+| `OMNI_URL` | Omnistatus endpoint. Example: `http://host:8001/analyze/custom`. |
+| `OMNI_APIKEY` | Optional legacy API key. Not sent to `/analyze/custom`. |
+| `OMNI_API_MAX_CHARS` | Max response length appended to the API prompt. Default: `200`; use `0` or empty to disable. |
+| `OMNI_DEFAULT_QUERY_MINUTES` | Voice fallback range when the user does not specify time. Default: `60`. |
+| `OMNI_DEFAULT_QUERY_HOURS` | CLI fallback range when no `--hours` or `--minutes` is provided. Default: `12`. |
 
 ## Omnistatus API
 

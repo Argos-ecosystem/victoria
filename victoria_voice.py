@@ -45,19 +45,21 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_VOICE_MODEL = os.getenv("OPENAI_VOICE_MODEL", "gpt-4o-mini")
 OPENAI_TRANSCRIBE_MODEL = os.getenv("OPENAI_TRANSCRIBE_MODEL", "whisper-1")
-VICTORIA_APIKEY = os.getenv("VICTORIA_APIKEY")
+OMNI_APIKEY = os.getenv("OMNI_APIKEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_TRANSCRIBE_MODEL = os.getenv("GEMINI_TRANSCRIBE_MODEL", "gemini-2.5-flash")
-VICTORIA_URL = os.getenv("VICTORIA_URL", "http://localhost:8888/analyze/custom")
-RECORDING_SOUND = os.getenv("VICTORIA_RECORDING_SOUND", "/System/Library/Sounds/Ping.aiff")
-VICTORIA_API_MAX_CHARS = os.getenv("VICTORIA_API_MAX_CHARS", "200").strip()
+OMNI_URL = os.getenv("OMNI_URL", "http://localhost:8001/analyze/custom")
+RECORDING_SOUND = os.getenv("OMNI_RECORDING_SOUND", "/System/Library/Sounds/Ping.aiff")
+OMNI_API_MAX_CHARS = os.getenv("OMNI_API_MAX_CHARS", "200")
+OMNI_API_MAX_CHARS = OMNI_API_MAX_CHARS.strip()
 GOOGLE_ASR_LANGUAGES = [
     lang.strip()
-    for lang in os.getenv("VICTORIA_GOOGLE_ASR_LANGUAGES", "es-CL,es-ES,es-419").split(",")
+    for lang in os.getenv("OMNI_GOOGLE_ASR_LANGUAGES", "es-CL,es-ES,es-419").split(",")
     if lang.strip()
 ]
-LOCAL_ASR_MODEL = os.getenv("VICTORIA_LOCAL_ASR_MODEL", "tiny")
-LOCAL_ASR_TIMEOUT_SECONDS = int(os.getenv("VICTORIA_LOCAL_ASR_TIMEOUT_SECONDS", "60"))
+LOCAL_ASR_MODEL = os.getenv("OMNI_LOCAL_ASR_MODEL", "tiny")
+LOCAL_ASR_TIMEOUT_SECONDS = int(os.getenv("OMNI_LOCAL_ASR_TIMEOUT_SECONDS", "60"))
+DEFAULT_QUERY_MINUTES = int(os.getenv("OMNI_DEFAULT_QUERY_MINUTES", "60"))
 BAD_TRANSCRIPT_MARKERS = (
     "[NO_SPEECH]",
     "amara.org",
@@ -77,8 +79,8 @@ if not OPENAI_API_KEY:
     print("Error: falta OPENAI_API_KEY en el archivo .env.")
     raise SystemExit(1)
 
-if not VICTORIA_APIKEY:
-    print("Error: falta VICTORIA_APIKEY en el archivo .env.")
+if not OMNI_APIKEY:
+    print("Error: falta OMNI_APIKEY en el archivo .env.")
     raise SystemExit(1)
 
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
@@ -99,8 +101,8 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "consultar_servidor_victoria",
-            "description": "Consulta los eventos recientes de Victoria y devuelve un analisis breve.",
+            "name": "consultar_omnistatus",
+            "description": "Consulta los eventos recientes de Omnistatus y devuelve un analisis breve.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -124,7 +126,7 @@ TOOLS = [
     }
 ]
 
-def normalize_victoria_url(url: str) -> str:
+def normalize_omni_url(url: str) -> str:
     if url.endswith("/analyze/on-demand"):
         return url[: -len("/analyze/on-demand")] + "/analyze/custom"
     return url
@@ -144,13 +146,13 @@ def format_omnistatus_response(data: dict) -> str:
 
 def build_api_prompt(prompt: str) -> str:
     prompt = (prompt or "").strip()
-    if not VICTORIA_API_MAX_CHARS:
+    if not OMNI_API_MAX_CHARS:
         return prompt
 
     try:
-        max_chars = int(VICTORIA_API_MAX_CHARS)
+        max_chars = int(OMNI_API_MAX_CHARS)
     except ValueError:
-        print(f"Aviso: VICTORIA_API_MAX_CHARS invalido: {VICTORIA_API_MAX_CHARS!r}.")
+        print(f"Aviso: OMNI_API_MAX_CHARS invalido: {OMNI_API_MAX_CHARS!r}.")
         return prompt
 
     if max_chars <= 0:
@@ -159,18 +161,19 @@ def build_api_prompt(prompt: str) -> str:
     return f"{prompt}\n\nResponde en maximo {max_chars} caracteres."
 
 
-def consultar_servidor_victoria(minutos: int, prompt: str) -> str:
+def consultar_omnistatus(minutos: int, prompt: str) -> str:
     hours = minutes_to_hours(minutos)
     api_prompt = build_api_prompt(prompt)
     print(f"[Function Call] hours={hours} | minutos={minutos} | prompt='{api_prompt}'")
 
-    params = {"hours": hours, "prompt": api_prompt}
-    if VICTORIA_APIKEY:
-        params["apikey"] = VICTORIA_APIKEY
-    headers = {"ngrok-skip-browser-warning": "true"}
+    payload = {"hours": hours, "prompt": api_prompt}
+    headers = {
+        "Content-Type": "application/json",
+        "ngrok-skip-browser-warning": "true",
+    }
 
     try:
-        response = requests.get(normalize_victoria_url(VICTORIA_URL), params=params, headers=headers, timeout=60)
+        response = requests.post(normalize_omni_url(OMNI_URL), json=payload, headers=headers, timeout=60)
         response.raise_for_status()
         data = response.json()
         return format_omnistatus_response(data)
@@ -546,7 +549,7 @@ def transcribe_audio(filename, asr_provider):
 
 
 def run_tool_call(tool_call, user_prompt: str):
-    if tool_call.function.name != "consultar_servidor_victoria":
+    if tool_call.function.name != "consultar_omnistatus":
         return f"Tool desconocida: {tool_call.function.name}"
 
     try:
@@ -558,7 +561,7 @@ def run_tool_call(tool_call, user_prompt: str):
     prompt = user_prompt.strip()
     if not prompt:
         prompt = (args.get("prompt") or "").strip()
-    return consultar_servidor_victoria(minutos=minutos, prompt=prompt)
+    return consultar_omnistatus(minutos=minutos, prompt=prompt)
 
 
 def ask_openai(prompt_text, minutes=60):
@@ -570,7 +573,7 @@ def ask_openai(prompt_text, minutes=60):
             "content": (
                 "Eres Victoria, una asistente de voz inteligente, concisa y conversacional. "
                 "Si el usuario pregunta por eventos, reportes, resumenes, incidentes o actividad reciente, "
-                "usa la herramienta consultar_servidor_victoria. Debes inferir el parametro minutos desde el texto: "
+                "usa la herramienta consultar_omnistatus. Debes inferir el parametro minutos desde el texto: "
                 "15 minutos = 15, media hora = 30, una hora = 60, dos horas = 120, tres horas = 180, "
                 "hoy o el dia = 1440, ayer = 2880. Si el usuario no especifica tiempo, "
                 f"asume {minutes} minutos. Cuando llames la herramienta, el campo prompt debe ser exactamente "
@@ -633,16 +636,16 @@ def speak_text(text):
 def main():
     parser = argparse.ArgumentParser(description="Victoria Voice Interface")
     parser.add_argument("-d", "--duration", type=int, default=6, help="Duracion de la grabacion en segundos.")
-    parser.add_argument("-m", "--minutes", type=int, default=60, help="Minutos por defecto para consultar eventos.")
+    parser.add_argument("-m", "--minutes", type=int, default=DEFAULT_QUERY_MINUTES, help="Minutos por defecto para consultar eventos.")
     parser.add_argument(
         "--asr",
         choices=["openai"],
-        default=os.getenv("VICTORIA_ASR", "openai"),
+        default=os.getenv("OMNI_ASR", "openai"),
     )
     parser.add_argument(
         "--trigger",
         choices=["enter", "media"],
-        default=os.getenv("VICTORIA_TRIGGER", "enter"),
+        default=os.getenv("OMNI_TRIGGER", "enter"),
         help="Como iniciar la grabacion cuando se usa --no-wakeword.",
     )
     parser.add_argument(

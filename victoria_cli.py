@@ -6,14 +6,15 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DEFAULT_URL = "http://localhost:8888/analyze/custom"
-VICTORIA_URL = os.getenv("VICTORIA_URL", DEFAULT_URL)
-VICTORIA_APIKEY = os.getenv("VICTORIA_APIKEY")
-VICTORIA_API_MAX_CHARS = os.getenv("VICTORIA_API_MAX_CHARS", "200").strip()
-DEFAULT_QUERY_HOURS = int(os.getenv("VICTORIA_DEFAULT_QUERY_HOURS", "12"))
+DEFAULT_URL = "http://localhost:8001/analyze/custom"
+OMNI_URL = os.getenv("OMNI_URL", DEFAULT_URL)
+OMNI_APIKEY = os.getenv("OMNI_APIKEY")
+OMNI_API_MAX_CHARS = os.getenv("OMNI_API_MAX_CHARS", "200")
+OMNI_API_MAX_CHARS = OMNI_API_MAX_CHARS.strip()
+DEFAULT_QUERY_HOURS = int(os.getenv("OMNI_DEFAULT_QUERY_HOURS", "12"))
 
 
-def normalize_victoria_url(url: str) -> str:
+def normalize_omni_url(url: str) -> str:
     if url.endswith("/analyze/on-demand"):
         return url[: -len("/analyze/on-demand")] + "/analyze/custom"
     return url
@@ -30,13 +31,13 @@ def clamp_hours(hours: int) -> int:
 
 def build_api_prompt(prompt: str) -> str:
     prompt = (prompt or "").strip()
-    if not VICTORIA_API_MAX_CHARS:
+    if not OMNI_API_MAX_CHARS:
         return prompt
 
     try:
-        max_chars = int(VICTORIA_API_MAX_CHARS)
+        max_chars = int(OMNI_API_MAX_CHARS)
     except ValueError:
-        print(f"Aviso: VICTORIA_API_MAX_CHARS invalido: {VICTORIA_API_MAX_CHARS!r}.")
+        print(f"Aviso: OMNI_API_MAX_CHARS invalido: {OMNI_API_MAX_CHARS!r}.")
         return prompt
 
     if max_chars <= 0:
@@ -63,13 +64,13 @@ def build_payload(prompt: str, hours: int) -> dict:
     return {"hours": clamp_hours(hours), "prompt": build_api_prompt(prompt)}
 
 
-def query_omnistatus(prompt: str, hours: int, url: str = VICTORIA_URL):
+def query_omnistatus(prompt: str, hours: int, url: str = OMNI_URL):
     payload = build_payload(prompt, hours)
     headers = {
         "Content-Type": "application/json",
         "ngrok-skip-browser-warning": "true",
     }
-    target_url = normalize_victoria_url(url)
+    target_url = normalize_omni_url(url)
     response = requests.post(target_url, json=payload, headers=headers, timeout=60)
     response.raise_for_status()
     return target_url, payload, response.json()
@@ -97,7 +98,7 @@ def parse_args():
     parser.add_argument(
         "--url",
         help="URL del endpoint /analyze/custom",
-        default=VICTORIA_URL,
+        default=OMNI_URL,
     )
     parser.add_argument(
         "--raw",

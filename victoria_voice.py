@@ -310,6 +310,7 @@ def record_audio(filename="temp_query.wav", duration=5, fs=44100):
     recording = sd.rec(int(duration * fs), samplerate=fs, channels=1, dtype="int16")
     sd.wait()
     sf.write(filename, recording, fs)
+    play_recording_sound()
     print("Audio grabado.")
     return filename
 

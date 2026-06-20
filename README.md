@@ -38,6 +38,9 @@ pip install -r requirements.txt
 | `GEMINI_TRANSCRIBE_MODEL` | Gemini transcription model. Default: `gemini-2.5-flash`. |
 | `OMNI_ASR` | Voice transcription provider: `openai`, `gemini`, `google`, `local`, or `auto`. Default: `openai`. |
 | `OMNI_GOOGLE_ASR_LANGUAGES` | Comma-separated Google ASR language fallbacks. Default: `es-CL,es-ES,es-419`. |
+| `OMNI_WAKEWORD_LISTEN_TIMEOUT_SECONDS` | Wake-word microphone listen timeout before retrying. Default: `1`. |
+| `OMNI_WAKEWORD_PHRASE_TIME_LIMIT_SECONDS` | Max seconds captured per wake-word phrase. Default: `3`. |
+| `OMNI_WAKEWORD_ERROR_SLEEP_SECONDS` | Pause after transient wake-word recognition errors before listening again. Default: `0.5`. |
 | `OMNI_LOCAL_ASR_MODEL` | Optional faster-whisper local model name. Default: `tiny`. |
 | `OMNI_LOCAL_ASR_TIMEOUT_SECONDS` | Local ASR timeout. Default: `60`. |
 | `OMNI_RECORDING_SOUND` | macOS sound used at recording start/end. Default: `/System/Library/Sounds/Ping.aiff`. |

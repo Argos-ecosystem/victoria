@@ -6,6 +6,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import warnings
 
 import openai
@@ -57,6 +58,15 @@ PROCESSING_VOICE = os.getenv("OMNI_PROCESSING_VOICE", "Paulina").strip()
 PROCESSING_RATE = os.getenv("OMNI_PROCESSING_RATE", "175").strip()
 OMNI_API_MAX_CHARS = os.getenv("OMNI_API_MAX_CHARS", "200")
 OMNI_API_MAX_CHARS = OMNI_API_MAX_CHARS.strip()
+OPENAI_REQUEST_TIMEOUT_SECONDS = float(os.getenv("OMNI_OPENAI_TIMEOUT_SECONDS", "45"))
+OMNI_REQUEST_TIMEOUT_SECONDS = float(os.getenv("OMNI_REQUEST_TIMEOUT_SECONDS", "60"))
+GOOGLE_ASR_TIMEOUT_SECONDS = float(os.getenv("OMNI_GOOGLE_ASR_TIMEOUT_SECONDS", "8"))
+WAKEWORD_LISTEN_TIMEOUT_SECONDS = float(os.getenv("OMNI_WAKEWORD_LISTEN_TIMEOUT_SECONDS", "1"))
+WAKEWORD_PHRASE_TIME_LIMIT_SECONDS = float(os.getenv("OMNI_WAKEWORD_PHRASE_TIME_LIMIT_SECONDS", "3"))
+WAKEWORD_ERROR_SLEEP_SECONDS = float(os.getenv("OMNI_WAKEWORD_ERROR_SLEEP_SECONDS", "0.5"))
+RECORDING_TIMEOUT_PADDING_SECONDS = float(os.getenv("OMNI_RECORDING_TIMEOUT_PADDING_SECONDS", "3"))
+SOUND_TIMEOUT_SECONDS = float(os.getenv("OMNI_SOUND_TIMEOUT_SECONDS", "3"))
+TTS_PLAYBACK_TIMEOUT_PADDING_SECONDS = float(os.getenv("OMNI_TTS_PLAYBACK_TIMEOUT_PADDING_SECONDS", "10"))
 GOOGLE_ASR_LANGUAGES = [
     lang.strip()
     for lang in os.getenv("OMNI_GOOGLE_ASR_LANGUAGES", "es-CL,es-ES,es-419").split(",")
@@ -84,7 +94,7 @@ if not OPENAI_API_KEY:
     print("Error: falta OPENAI_API_KEY en el archivo .env.")
     raise SystemExit(1)
 
-client = openai.OpenAI(api_key=OPENAI_API_KEY)
+client = openai.OpenAI(api_key=OPENAI_API_KEY, timeout=OPENAI_REQUEST_TIMEOUT_SECONDS)
 gemini_client = genai.Client(api_key=GEMINI_API_KEY) if genai is not None and GEMINI_API_KEY else None
 WAKE_SOUND_FILE = "/System/Library/Sounds/Glass.aiff"
 OPENAI_TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
@@ -174,7 +184,12 @@ def consultar_omnistatus(minutos: int, prompt: str) -> str:
     }
 
     try:
-        response = requests.post(normalize_omni_url(OMNI_URL), json=payload, headers=headers, timeout=60)
+        response = requests.post(
+            normalize_omni_url(OMNI_URL),
+            json=payload,
+            headers=headers,
+            timeout=OMNI_REQUEST_TIMEOUT_SECONDS,
+        )
         response.raise_for_status()
         data = response.json()
         return format_omnistatus_response(data)
@@ -187,7 +202,7 @@ def play_recording_sound():
         return
 
     try:
-        subprocess.run(["afplay", RECORDING_SOUND], check=False)
+        subprocess.run(["afplay", RECORDING_SOUND], check=False, timeout=SOUND_TIMEOUT_SECONDS)
     except Exception as e:
         print(f"Aviso: no se pudo reproducir el sonido de grabacion: {e}")
 
@@ -227,7 +242,7 @@ def stop_processing_message(process):
 
 def play_wake_sound():
     try:
-        subprocess.run(["afplay", WAKE_SOUND_FILE], check=True)
+        subprocess.run(["afplay", WAKE_SOUND_FILE], check=True, timeout=SOUND_TIMEOUT_SECONDS)
     except Exception:
         # Si falla el sonido del sistema, se ignora y se continúa
         pass
@@ -239,15 +254,22 @@ def wait_for_wakeword():
         return
 
     recognizer = sr.Recognizer()
+    recognizer.operation_timeout = GOOGLE_ASR_TIMEOUT_SECONDS
     print("\nEn reposo. Di 'Victoria' para despertarme, o presiona Ctrl+C para salir.")
 
     with sr.Microphone() as source:
         recognizer.adjust_for_ambient_noise(source, duration=0.5)
+        consecutive_errors = 0
 
         while True:
             try:
-                audio = recognizer.listen(source, timeout=1, phrase_time_limit=3)
+                audio = recognizer.listen(
+                    source,
+                    timeout=WAKEWORD_LISTEN_TIMEOUT_SECONDS,
+                    phrase_time_limit=WAKEWORD_PHRASE_TIME_LIMIT_SECONDS,
+                )
                 text = recognizer.recognize_google(audio, language="es-ES").lower()
+                consecutive_errors = 0
                 if "victoria" in text:
                     print("Victoria despierta.")
                     play_recording_sound()
@@ -257,8 +279,10 @@ def wait_for_wakeword():
             except sr.UnknownValueError:
                 continue
             except Exception as e:
-                input(f"\nNo pude usar la palabra de activacion ({e}). Presiona Enter para hablar...")
-                return
+                consecutive_errors += 1
+                if consecutive_errors == 1 or consecutive_errors % 5 == 0:
+                    print(f"\nAviso: fallo temporal al escuchar la palabra de activacion ({e}). Sigo escuchando.")
+                time.sleep(WAKEWORD_ERROR_SLEEP_SECONDS)
 
 
 def is_media_trigger_key(key) -> bool:
@@ -342,7 +366,7 @@ def record_audio(filename="temp_query.wav", duration=5, fs=44100):
     print(f"\nGrabando por {duration} segundos. Habla ahora.")
     play_recording_sound()
     recording = sd.rec(int(duration * fs), samplerate=fs, channels=1, dtype="int16")
-    sd.wait()
+    wait_for_recording(duration + RECORDING_TIMEOUT_PADDING_SECONDS)
     sf.write(filename, recording, fs)
     play_recording_sound()
     print("Audio grabado.")
@@ -490,6 +514,7 @@ def transcribe_audio_google(filename):
 
     print("Transcribiendo audio con Google ASR optimizado...")
     recognizer = sr.Recognizer()
+    recognizer.operation_timeout = GOOGLE_ASR_TIMEOUT_SECONDS
     recognizer.dynamic_energy_threshold = False
     recognizer.energy_threshold = 180
     prepared_filename = prepare_audio_for_asr(filename, suffix="google")
@@ -579,6 +604,28 @@ def transcribe_audio_local(filename):
         signal.signal(signal.SIGALRM, previous_handler)
 
 
+def wait_for_recording(timeout_seconds):
+    done = threading.Event()
+    error = []
+
+    def wait_for_device():
+        try:
+            sd.wait()
+        except Exception as e:
+            error.append(e)
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=wait_for_device, daemon=True)
+    thread.start()
+    if not done.wait(timeout_seconds):
+        sd.stop()
+        raise TimeoutError(f"La grabacion no termino dentro de {timeout_seconds:.1f}s")
+
+    if error:
+        raise error[0]
+
+
 ASR_PROVIDERS = ("auto", "openai", "gemini", "google", "local")
 
 
@@ -658,6 +705,7 @@ def ask_openai(prompt_text, minutes=60):
                 messages=messages,
                 tools=TOOLS,
                 tool_choice="auto",
+                timeout=OPENAI_REQUEST_TIMEOUT_SECONDS,
             )
             message = response.choices[0].message
             messages.append(message.model_dump(exclude_none=True))
@@ -693,9 +741,11 @@ def speak_text(text):
             input=text,
             instructions=OPENAI_TTS_INSTRUCTIONS,
             speed=OPENAI_TTS_SPEED,
+            timeout=OPENAI_REQUEST_TIMEOUT_SECONDS,
         ) as response:
             response.stream_to_file(tts_filename)
-        subprocess.run(["afplay", tts_filename], check=False)
+        playback_timeout = max(10.0, len(text) * 0.09 + TTS_PLAYBACK_TIMEOUT_PADDING_SECONDS)
+        subprocess.run(["afplay", tts_filename], check=False, timeout=playback_timeout)
     except Exception as e:
         print(f"Error en TTS: {e}")
 

@@ -45,11 +45,16 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_VOICE_MODEL = os.getenv("OPENAI_VOICE_MODEL", "gpt-4o-mini")
 OPENAI_TRANSCRIBE_MODEL = os.getenv("OPENAI_TRANSCRIBE_MODEL", "whisper-1")
-OMNI_APIKEY = os.getenv("OMNI_APIKEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_TRANSCRIBE_MODEL = os.getenv("GEMINI_TRANSCRIBE_MODEL", "gemini-2.5-flash")
 OMNI_URL = os.getenv("OMNI_URL", "http://localhost:8001/analyze/custom")
 RECORDING_SOUND = os.getenv("OMNI_RECORDING_SOUND", "/System/Library/Sounds/Ping.aiff")
+PROCESSING_MESSAGE = os.getenv(
+    "OMNI_PROCESSING_MESSAGE",
+    "Consultando el sistema central de inteligencia artificial.",
+).strip()
+PROCESSING_VOICE = os.getenv("OMNI_PROCESSING_VOICE", "Paulina").strip()
+PROCESSING_RATE = os.getenv("OMNI_PROCESSING_RATE", "175").strip()
 OMNI_API_MAX_CHARS = os.getenv("OMNI_API_MAX_CHARS", "200")
 OMNI_API_MAX_CHARS = OMNI_API_MAX_CHARS.strip()
 GOOGLE_ASR_LANGUAGES = [
@@ -79,12 +84,8 @@ if not OPENAI_API_KEY:
     print("Error: falta OPENAI_API_KEY en el archivo .env.")
     raise SystemExit(1)
 
-if not OMNI_APIKEY:
-    print("Error: falta OMNI_APIKEY en el archivo .env.")
-    raise SystemExit(1)
-
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+gemini_client = genai.Client(api_key=GEMINI_API_KEY) if genai is not None and GEMINI_API_KEY else None
 WAKE_SOUND_FILE = "/System/Library/Sounds/Glass.aiff"
 OPENAI_TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts")
 OPENAI_TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "coral")
@@ -189,6 +190,39 @@ def play_recording_sound():
         subprocess.run(["afplay", RECORDING_SOUND], check=False)
     except Exception as e:
         print(f"Aviso: no se pudo reproducir el sonido de grabacion: {e}")
+
+
+def start_processing_message():
+    if not PROCESSING_MESSAGE:
+        return None
+
+    command = ["say"]
+    if PROCESSING_VOICE:
+        command.extend(["-v", PROCESSING_VOICE])
+    if PROCESSING_RATE:
+        command.extend(["-r", PROCESSING_RATE])
+    command.append(PROCESSING_MESSAGE)
+
+    try:
+        print(f"Victoria: {PROCESSING_MESSAGE}")
+        return subprocess.Popen(command)
+    except Exception as e:
+        print(f"Aviso: no se pudo reproducir el mensaje de espera: {e}")
+        return None
+
+
+def stop_processing_message(process):
+    if process is None or process.poll() is not None:
+        return
+
+    try:
+        process.terminate()
+        process.wait(timeout=1)
+    except Exception:
+        try:
+            process.kill()
+        except Exception:
+            pass
 
 
 def play_wake_sound():
@@ -545,8 +579,40 @@ def transcribe_audio_local(filename):
         signal.signal(signal.SIGALRM, previous_handler)
 
 
-def transcribe_audio(filename, asr_provider):
+ASR_PROVIDERS = ("auto", "openai", "gemini", "google", "local")
+
+
+def get_auto_asr_providers():
+    providers = []
+    if gemini_client is not None:
+        providers.append("gemini")
+    if sr is not None:
+        providers.append("google")
+    if WhisperModel is not None:
+        providers.append("local")
+    providers.append("openai")
+    return providers
+
+
+def transcribe_audio_with_provider(filename, asr_provider):
+    if asr_provider == "gemini":
+        return transcribe_audio_gemini(filename)
+    if asr_provider == "google":
+        return transcribe_audio_google(filename)
+    if asr_provider == "local":
+        return transcribe_audio_local(filename)
     return transcribe_audio_openai(filename)
+
+
+def transcribe_audio(filename, asr_provider):
+    if asr_provider == "auto":
+        for provider in get_auto_asr_providers():
+            text = transcribe_audio_with_provider(filename, provider)
+            if text:
+                return text
+        return ""
+
+    return transcribe_audio_with_provider(filename, asr_provider)
 
 
 def run_tool_call(tool_call, user_prompt: str):
@@ -640,8 +706,9 @@ def main():
     parser.add_argument("-m", "--minutes", type=int, default=DEFAULT_QUERY_MINUTES, help="Minutos por defecto para consultar eventos.")
     parser.add_argument(
         "--asr",
-        choices=["openai"],
+        choices=ASR_PROVIDERS,
         default=os.getenv("OMNI_ASR", "openai"),
+        help="Motor de transcripcion. 'auto' prueba proveedores disponibles y cae a OpenAI.",
     )
     parser.add_argument(
         "--trigger",
@@ -667,6 +734,7 @@ def main():
     print(f"Configuracion: escucha={args.duration}s, asr={args.asr}, trigger={args.trigger}.")
 
     while True:
+        processing_process = None
         try:
             if args.no_wakeword:
                 wait_for_record_trigger(args.trigger)
@@ -674,20 +742,26 @@ def main():
                 wait_for_wakeword()
 
             audio_file = record_audio(duration=args.duration)
+            processing_process = start_processing_message()
             text = transcribe_audio(audio_file, args.asr)
             if not text.strip():
+                stop_processing_message(processing_process)
                 print("No se escucho nada claro. Intenta de nuevo.")
                 continue
 
             response_text = ask_openai(text, minutes=args.minutes)
+            stop_processing_message(processing_process)
             speak_text(response_text)
         except KeyboardInterrupt:
+            stop_processing_message(processing_process)
             print("\nSaliendo de la interfaz de voz...")
             break
         except EOFError:
+            stop_processing_message(processing_process)
             print("\nNo hay entrada interactiva disponible para iniciar la grabacion.")
             break
         except Exception as e:
+            stop_processing_message(processing_process)
             print(f"\nError inesperado: {e}")
 
 

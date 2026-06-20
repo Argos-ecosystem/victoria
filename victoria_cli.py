@@ -8,7 +8,6 @@ load_dotenv()
 
 DEFAULT_URL = "http://localhost:8001/analyze/custom"
 OMNI_URL = os.getenv("OMNI_URL", DEFAULT_URL)
-OMNI_APIKEY = os.getenv("OMNI_APIKEY")
 OMNI_API_MAX_CHARS = os.getenv("OMNI_API_MAX_CHARS", "200")
 OMNI_API_MAX_CHARS = OMNI_API_MAX_CHARS.strip()
 DEFAULT_QUERY_HOURS = int(os.getenv("OMNI_DEFAULT_QUERY_HOURS", "12"))

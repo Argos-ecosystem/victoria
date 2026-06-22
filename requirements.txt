@@ -7,3 +7,7 @@ sounddevice
 soundfile
 SpeechRecognition
 pynput
+opencv-python
+chromadb
+Pillow
+sentence-transformers

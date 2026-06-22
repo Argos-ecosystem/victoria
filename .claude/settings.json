@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(run)",
+      "Skill(run:*)",
+      "Bash(pkill -f \"victoria_voice.py\")",
+      "Bash(awk '{print $2, $11, $12}')",
+      "Bash(awk '{print $2, $12}')",
+      "Bash(osascript -e ' *)"
+    ]
+  }
+}

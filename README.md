@@ -41,12 +41,38 @@ pip install -r requirements.txt
 | `OMNI_WAKEWORD_LISTEN_TIMEOUT_SECONDS` | Wake-word microphone listen timeout before retrying. Default: `1`. |
 | `OMNI_WAKEWORD_PHRASE_TIME_LIMIT_SECONDS` | Max seconds captured per wake-word phrase. Default: `3`. |
 | `OMNI_WAKEWORD_ERROR_SLEEP_SECONDS` | Pause after transient wake-word recognition errors before listening again. Default: `0.5`. |
+| `OMNI_WAKEWORD_SAMPLE_RATE` | Sample rate used by the sounddevice wake-word fallback when PyAudio is unavailable. Default: `16000`. |
+| `OMNI_WAKEWORD_MIN_RMS` | Minimum RMS level before trying wake-word transcription with sounddevice. Default: `35`. |
+| `OMNI_WAKEWORD_MIN_PEAK` | Minimum peak level before trying wake-word transcription with sounddevice. Default: `350`. |
 | `OMNI_LOCAL_ASR_MODEL` | Optional faster-whisper local model name. Default: `tiny`. |
 | `OMNI_LOCAL_ASR_TIMEOUT_SECONDS` | Local ASR timeout. Default: `60`. |
 | `OMNI_RECORDING_SOUND` | macOS sound used at recording start/end. Default: `/System/Library/Sounds/Ping.aiff`. |
-| `OMNI_PROCESSING_MESSAGE` | Spoken waiting message after recording ends. Default: `Consultando el sistema central de inteligencia artificial.` Empty disables it. |
+| `OMNI_PROCESSING_MESSAGE` | Spoken waiting message after recording ends. Default: `Consultando el sistema central de datos.` Empty disables it. |
 | `OMNI_PROCESSING_VOICE` | macOS `say` voice for the waiting message. Default: `Paulina`. |
 | `OMNI_PROCESSING_RATE` | macOS `say` speaking rate for the waiting message. Default: `175`. |
+| `OMNI_RECORDING_PROMPT_MESSAGE` | Spoken cue before the recording-start sound. Default: `Habla al escuchar el pip.` Empty disables it. |
+| `OMNI_RECORDING_PROMPT_VOICE` | macOS `say` voice for the recording cue. Default: same as `OMNI_PROCESSING_VOICE`. |
+| `OMNI_RECORDING_PROMPT_RATE` | macOS `say` speaking rate for the recording cue. Default: `190`. |
+| `OMNI_VOICE_UI` | Opens the visual spectrum window for the voice flow. Default: `1`; use `0` to disable. |
+| `OMNI_VOICE_UI_WIDTH` | Width of the visual window. Default: `1280`. |
+| `OMNI_VOICE_UI_HEIGHT` | Height of the visual window. Default: `720`. |
+| `OMNI_FACE_UI` | Shows the integrated webcam panel with local face detection and red boxes. Default: `1`; use `0` to disable. |
+| `OMNI_FACE_CAMERA_INDEX` | Webcam index used for face detection. Default: `0`. |
+| `OMNI_FACE_UI_SCALE` | Webcam display scale. Default: `0.85`. |
+| `OMNI_FACE_PANEL_WIDTH` | Integrated webcam panel width. Default: `420`. |
+| `OMNI_FACE_PANEL_HEIGHT` | Integrated webcam panel height. Default: `260`. |
+| `OMNI_FACE_DETECT_SCALE_FACTOR` | Haar cascade scan scale factor. Higher can reduce detections. Default: `1.12`. |
+| `OMNI_FACE_DETECT_MIN_NEIGHBORS` | Haar cascade confidence-like neighbor threshold. Higher reduces false positives. Default: `10`. |
+| `OMNI_FACE_DETECT_MIN_SIZE` | Minimum detected face size in pixels. Higher reduces small false positives. Default: `80`. |
+| `OMNI_FACE_MEMORY` | Enables local face memory in ChromaDB. Default: `1`. |
+| `OMNI_FACE_MEMORY_DIR` | Persistent ChromaDB directory. Default: `.victoria_face_memory`. |
+| `OMNI_FACE_MEMORY_COLLECTION` | ChromaDB collection name. Default: `victoria_faces`. |
+| `OMNI_FACE_MEMORY_BACKEND` | Face embedding backend: `opencv` for lightweight local embeddings, or `clip` for SentenceTransformers CLIP. Default: `opencv`. |
+| `OMNI_FACE_MEMORY_MODEL` | SentenceTransformers CLIP model used when backend is `clip`. Default: `clip-ViT-B-32`. |
+| `OMNI_FACE_MEMORY_SAMPLES` | Number of webcam face samples saved per person. Default: `3`. |
+| `OMNI_FACE_MEMORY_THRESHOLD` | Max Chroma cosine distance accepted as a match. Lower is stricter. Default: `0.30`. |
+| `OMNI_FACE_MEMORY_COOLDOWN_SECONDS` | Minimum seconds between face recognition checks. Default: `20`. |
+| `OMNI_FACE_MEMORY_ASK_ENROLL` | Asks for a name after an unrecognized conversation and stores face samples. Default: `1`. |
 
 ## Omnistatus API
 
@@ -99,10 +125,26 @@ python3 victoria_voice.py
 
 The voice flow waits for the wake word `Victoria`, records the question, plays a configurable waiting message while processing, infers a time range, uses 12 hours when no range is clear, converts it to `hours`, calls Omnistatus, and speaks the `msg` field from the response.
 
+By default the voice flow opens one large visual window with a central AI face that changes expression by state, side equalizers, a centered `Humano` label, and an integrated webcam panel that marks detected faces with red boxes.
+
+If face memory dependencies are installed, Victoria stores three face crops as local embeddings in ChromaDB after asking for a name. On later sessions, recognized faces are greeted by name near the start of the interaction. Set `OMNI_FACE_MEMORY_BACKEND=clip` to use CLIP embeddings; the first run may need to download a large model.
+
 To skip the wake word and record immediately:
 
 ```bash
 python3 victoria_voice.py --no-wakeword
+```
+
+To run without the visual window:
+
+```bash
+python3 victoria_voice.py --no-ui
+```
+
+To run without the integrated webcam face panel:
+
+```bash
+python3 victoria_voice.py --no-face-ui
 ```
 
 To try available transcription providers before falling back to OpenAI:

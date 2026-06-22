@@ -19,6 +19,7 @@ myenv/
 
 # Generated audio/runtime files
 .local-runtime/
+.victoria_face_memory/
 temp_query*.*
 temp_response*.*
 *.wav
